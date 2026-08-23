@@ -583,26 +583,28 @@ async function startSession(){
   liveSocketOpenedAt = null;
   liveSetupCompletedAt = null;
 
-  // 1) microphone
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:1 }
-    });
-  } catch (e){
-    console.error('mic', e);
-    fail(e && e.name === 'NotAllowedError'
-      ? 'Please allow microphone access for JARVIS, then tap again.'
-      : 'No microphone was found. Connect one and try again.');
-    return;
-  }
-
-  // 2) ephemeral token from the backend (real key never reaches the browser)
+  // 1) microphone + 2) ephemeral token (real key never reaches the browser)
+  // Both are on the critical path, so start them concurrently: the token
+  // fetch runs in the background while the user taps "Allow" on the mic.
+  const micPromise = navigator.mediaDevices.getUserMedia({
+    audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:1 }
+  });
   let auth;
   try {
     auth = await getToken();
   } catch (e){
     console.error('token', e);
+    try { const s = await micPromise; s.getTracks().forEach(t=>t.stop()); } catch(_){}
     fail(e.message || "I couldn't connect to JARVIS's AI service.");
+    return;
+  }
+  try {
+    micStream = await micPromise;
+  } catch (e){
+    console.error('mic', e);
+    fail(e && e.name === 'NotAllowedError'
+      ? 'Please allow microphone access for JARVIS, then tap again.'
+      : 'No microphone was found. Connect one and try again.');
     return;
   }
 
@@ -860,6 +862,7 @@ function flushPlayback(){
 
 function stopSession(silent){
   setSession(false);
+  stopWarm();
   flushPlayback();
   try { if (ws){ ws.onclose = null; ws.close(); } } catch(e){}
   ws = null;
@@ -876,6 +879,30 @@ function stopSession(silent){
 }
 
 /* ------------------------------------------------------------------ */
+/* Backend keep-warm                                                   */
+/* ------------------------------------------------------------------ */
+// A cold Apps Script web app can take several seconds to answer the first
+// token request. A lightweight ping on page load (and every 45s while a
+// session is active) keeps the runtime hot so session starts are fast.
+let warmTimer = null;
+function warmBackend(){
+  if (!BACKEND_URL || BACKEND_URL.indexOf('PASTE_YOUR') === 0) return;
+  fetch(BACKEND_URL + (BACKEND_URL.includes('?')?'&':'?') + 'action=ping&t=' + Date.now())
+    .then(r => r.json())
+    .then(d => { if (d && d.ok) console.debug('[JARVIS] backend warm, model: ' + d.model); })
+    .catch(() => {});
+}
+function startWarm(){
+  warmBackend();
+  clearInterval(warmTimer);
+  warmTimer = setInterval(warmBackend, 45000);
+}
+function stopWarm(){
+  clearInterval(warmTimer);
+  warmTimer = null;
+}
+
+/* ------------------------------------------------------------------ */
 els.mic.addEventListener('click', () => { active ? stopSession(false) : startSession(); });
 addEventListener('keydown', e => {
   if (e.code === 'Space' && e.target === document.body){ e.preventDefault(); els.mic.click(); }
@@ -884,6 +911,7 @@ addEventListener('beforeunload', () => stopSession(true));
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && active) stopSession(false);
 });
+startWarm(); // keep the backend hot so the first session starts quickly
 </script>
 </body>
 </html>

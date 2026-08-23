@@ -25,7 +25,7 @@
  */
 
 /** Live model used for the realtime audio session. */
-var LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';
+var LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 /** Cheap text model used only by the fallback path. */
 var TEXT_MODEL = 'gemini-2.5-flash';
 /** Prebuilt voice for JARVIS. Options: Puck, Charon, Kore, Fenrir, Aoede, Zephyr, Orus. */
@@ -49,8 +49,11 @@ var SYSTEM_INSTRUCTION = [
   '- Numbers, dates and units should be written the way a person would say them.',
   '',
   'Honesty and tools:',
-  '- Use Google Search grounding whenever the question involves current events, prices,',
-  '  weather, sports results or anything time-sensitive. Do not guess at live data.',
+  '- Use Google Search grounding ONLY when the answer depends on up-to-the-moment',
+  "  information (today's news, current prices, weather, live scores, recent events).",
+  '  For static facts, general knowledge, definitions or ordinary conversation, answer',
+  '  directly without searching — every search costs a couple of extra seconds.',
+  '- Do not guess at live data; if you genuinely need it and cannot search, say so.',
   '- If you cannot actually perform an action, say so plainly. Never claim to have opened,',
   '  sent, played or scheduled anything unless a tool actually did it.',
   '',
@@ -174,7 +177,7 @@ function liveSetup_() {
         startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
         endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
         prefixPaddingMs: 120,
-        silenceDurationMs: 550
+        silenceDurationMs: 400
       },
       activityHandling: 'START_OF_ACTIVITY_INTERRUPTS'
     },
