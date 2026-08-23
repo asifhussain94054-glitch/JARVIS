@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#03060d" />
+<title>JARVIS — Your Personal AI Assistant</title>
+<style>
+  :root{
+    --bg:#03060d;
+    --cyan:#38e8ff;
+    --cyan-dim:#1a7f96;
+    --amber:#ffb648;
+    --red:#ff5a6e;
+    --text:#dff3fa;
+    --muted:#6f8b98;
+    --accent:var(--cyan);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
+    overflow:hidden;display:flex;flex-direction:column;align-items:center;
+    justify-content:space-between;padding:max(18px,env(safe-area-inset-top)) 18px 24px;
+  }
+  /* ---- ambient background ---- */
+  .bg{position:fixed;inset:0;z-index:0;pointer-events:none}
+  .bg::before{
+    content:'';position:absolute;inset:-30%;
+    background:radial-gradient(circle at 50% 45%, rgba(56,232,255,.10), transparent 55%);
+    animation:breathe 9s ease-in-out infinite;
+  }
+  .grid{
+    position:absolute;inset:0;opacity:.16;
+    background-image:linear-gradient(rgba(56,232,255,.10) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(56,232,255,.10) 1px,transparent 1px);
+    background-size:64px 64px;
+    mask-image:radial-gradient(circle at 50% 45%,#000 10%,transparent 72%);
+    -webkit-mask-image:radial-gradient(circle at 50% 45%,#000 10%,transparent 72%);
+  }
+  .scan{position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(255,255,255,.022) 0 1px,transparent 1px 3px);animation:scan 12s linear infinite}
+  @keyframes scan{to{background-position-y:120px}}
+  @keyframes breathe{0%,100%{opacity:.7}50%{opacity:1}}
+
+  /* ---- header ---- */
+  header{position:relative;z-index:2;text-align:center;flex:0 0 auto}
+  h1{
+    margin:0;font-size:clamp(26px,7vw,46px);font-weight:200;letter-spacing:.62em;
+    text-indent:.62em;color:#eafcff;
+    text-shadow:0 0 24px rgba(56,232,255,.55),0 0 60px rgba(56,232,255,.22);
+  }
+  .tag{margin-top:9px;font-size:clamp(9px,2.4vw,11px);letter-spacing:.34em;color:var(--muted);text-transform:uppercase}
+
+  /* ---- orb ---- */
+  .stage{position:relative;z-index:2;flex:1 1 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;min-height:0}
+  .orbwrap{position:relative;width:min(60vw,300px);aspect-ratio:1;display:grid;place-items:center}
+  canvas#orb{position:absolute;inset:0;width:100%;height:100%}
+  .ring{
+    position:absolute;border-radius:50%;border:1px solid rgba(56,232,255,.18);
+    transition:border-color .5s ease;
+  }
+  .r1{inset:2%;animation:spin 26s linear infinite;border-style:dashed;border-color:rgba(56,232,255,.14)}
+  .r2{inset:-9%;animation:spin 44s linear infinite reverse;border-color:rgba(56,232,255,.10)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .status{
+    margin-top:26px;font-size:clamp(12px,3.2vw,14px);letter-spacing:.26em;text-transform:uppercase;
+    color:var(--accent);min-height:1.4em;transition:color .35s ease;
+    text-shadow:0 0 18px currentColor;
+  }
+  .hint{margin-top:8px;font-size:11px;letter-spacing:.08em;color:var(--muted);min-height:1.2em;text-align:center;padding:0 12px;max-width:520px}
+
+  /* ---- transcript ---- */
+  .log{
+    position:relative;z-index:2;width:min(680px,100%);max-height:24vh;overflow-y:auto;
+    margin-top:16px;display:flex;flex-direction:column;gap:8px;padding:0 4px;
+    mask-image:linear-gradient(180deg,transparent,#000 18px);
+    -webkit-mask-image:linear-gradient(180deg,transparent,#000 18px);
+    scrollbar-width:none;
+  }
+  .log::-webkit-scrollbar{display:none}
+  .msg{font-size:13.5px;line-height:1.55;opacity:0;animation:rise .35s forwards}
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .msg b{display:block;font-size:9.5px;letter-spacing:.24em;font-weight:600;margin-bottom:2px;text-transform:uppercase}
+  .me{text-align:right;color:#a9c6d2}
+  .me b{color:#4e7284}
+  .ai{color:#e6fbff}
+  .ai b{color:var(--cyan-dim)}
+  .msg.live{opacity:.62}
+
+  /* ---- control ---- */
+  .controls{position:relative;z-index:2;flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:12px;margin-top:14px}
+  button#mic{
+    width:82px;height:82px;border-radius:50%;cursor:pointer;
+    border:1px solid rgba(56,232,255,.45);
+    background:radial-gradient(circle at 50% 35%,rgba(56,232,255,.20),rgba(3,10,18,.9));
+    color:var(--accent);display:grid;place-items:center;
+    box-shadow:0 0 0 0 rgba(56,232,255,.35),0 0 30px rgba(56,232,255,.20) inset;
+    transition:transform .18s cubic-bezier(.2,.9,.3,1.4),box-shadow .3s,border-color .3s,color .3s;
+  }
+  button#mic:active{transform:scale(.93)}
+  button#mic svg{width:32px;height:32px}
+  body.on button#mic{
+    border-color:var(--accent);color:#031017;
+    background:radial-gradient(circle at 50% 35%,var(--accent),#0a5c72);
+    animation:halo 2.4s ease-out infinite;
+  }
+  @keyframes halo{
+    0%{box-shadow:0 0 0 0 rgba(56,232,255,.45)}
+    100%{box-shadow:0 0 0 26px rgba(56,232,255,0)}
+  }
+  .session{font-size:9.5px;letter-spacing:.3em;color:var(--muted);text-transform:uppercase}
+  body.on .session{color:var(--accent)}
+  .err{
+    position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translate(-50%,140%);
+    z-index:9;max-width:min(560px,92vw);padding:12px 18px;border-radius:12px;
+    background:rgba(30,6,10,.94);border:1px solid rgba(255,90,110,.5);color:#ffd9de;
+    font-size:13px;line-height:1.45;text-align:center;transition:transform .4s cubic-bezier(.2,.9,.3,1.2);
+    backdrop-filter:blur(8px);
+  }
+  .err.show{transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+
+<div class="bg"><div class="grid"></div><div class="scan"></div></div>
+
+<header>
+  <h1>JARVIS</h1>
+  <div class="tag">Your Personal AI Assistant</div>
+</header>
+
+<main class="stage">
+  <div class="orbwrap">
+    <div class="ring r2"></div>
+    <div class="ring r1"></div>
+    <canvas id="orb"></canvas>
+  </div>
+  <div class="status" id="status">Ready</div>
+  <div class="hint" id="hint">Tap the control once to begin a continuous voice session.</div>
+  <div class="log" id="log"></div>
+</main>
+
+<div class="controls">
+  <button id="mic" aria-label="Toggle voice session">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+      <rect x="9" y="2.5" width="6" height="11.5" rx="3"/>
+      <path d="M5 11.5a7 7 0 0 0 14 0"/><path d="M12 18.5V21.5"/>
+    </svg>
+  </button>
+  <div class="session" id="sessionLabel">Voice session off</div>
+</div>
+
+<div class="err" id="err"></div>
+
+<script>
+/* ==================================================================
+   JARVIS — realtime voice client
+   Architecture:  mic -> 16kHz PCM -> Gemini Live (WebSocket, ephemeral
+   token) -> streamed 24kHz PCM -> speakers.  Server-side VAD handles
+   turn taking and barge-in; nothing is transcribed in the browser.
+   ================================================================== */
+
+/* >>> PASTE YOUR APPS SCRIPT WEB APP /exec URL HERE <<< */
+const BACKEND_URL = "https://script.google.com/macros/s/AKfycbzJrvQD-Ia7pEqebsLvxTmqCATWc9631uC9YOO6aWo_wcY_Yn-pNMCq-zSafHyA6WF9BQ/exec";
+
+const WS_HOST = "wss://generativelanguage.googleapis.com";
+// Ephemeral tokens ONLY work on the ...Constrained endpoint.
+const WS_PATH = v => "/ws/google.ai.generativelanguage." + v + ".GenerativeService.BidiGenerateContentConstrained";
+const MIC_RATE = 16000, OUT_RATE = 24000;
+
+const $ = id => document.getElementById(id);
+const els = { status:$('status'), hint:$('hint'), log:$('log'), mic:$('mic'), session:$('sessionLabel'), err:$('err') };
+
+let state = 'idle';         // idle | connecting | listening | thinking | speaking | error
+let active = false;
+let ws = null, micCtx = null, outCtx = null, micStream = null, micNode = null, micSource = null;
+let outGain = null, analyser = null, freq = null;
+let playHead = 0, playing = 0;          // scheduled-chunk bookkeeping
+let liveNodes = [];                      // currently scheduled buffer sources
+let micLevel = 0, spkLevel = 0;
+let liveUser = null, liveAI = null;      // streaming transcript elements
+let greeted = false;
+
+/* ------------------------------------------------------------------ */
+/* UI                                                                  */
+/* ------------------------------------------------------------------ */
+const HINTS = {
+  idle:       'Tap the control once to begin a continuous voice session.',
+  connecting: 'Establishing secure realtime link…',
+  listening:  'Just talk. No need to press anything again.',
+  thinking:   '',
+  speaking:   'Speak any time to interrupt.',
+  error:      ''
+};
+const LABELS = { idle:'Ready', connecting:'Connecting', listening:'Listening', thinking:'Thinking', speaking:'Speaking', error:'Offline' };
+const COLORS = { idle:'#38e8ff', connecting:'#38e8ff', listening:'#38e8ff', thinking:'#ffb648', speaking:'#7ef3c6', error:'#ff5a6e' };
+
+function setState(s){
+  if (state === s) return;
+  state = s;
+  els.status.textContent = LABELS[s];
+  if (HINTS[s] !== undefined && !(s==='error')) els.hint.textContent = HINTS[s];
+  document.documentElement.style.setProperty('--accent', COLORS[s]);
+}
+function setSession(on){
+  active = on;
+  document.body.classList.toggle('on', on);
+  els.session.textContent = on ? 'Voice session on' : 'Voice session off';
+}
+function showError(msg){
+  els.err.textContent = msg;
+  els.err.classList.add('show');
+  clearTimeout(showError._t);
+  showError._t = setTimeout(()=>els.err.classList.remove('show'), 7000);
+}
+function addMsg(who, text, live){
+  const d = document.createElement('div');
+  d.className = 'msg ' + (who==='me'?'me':'ai') + (live?' live':'');
+  d.innerHTML = '<b>' + (who==='me'?'You':'JARVIS') + '</b><span></span>';
+  d.lastChild.textContent = text;
+  els.log.appendChild(d);
+  els.log.scrollTop = els.log.scrollHeight;
+  while (els.log.children.length > 40) els.log.removeChild(els.log.firstChild);
+  return d;
+}
+function appendTo(el, text){
+  el.lastChild.textContent += text;
+  els.log.scrollTop = els.log.scrollHeight;
+}
+function seal(el){ if (el) el.classList.remove('live'); }
+
+/* ------------------------------------------------------------------ */
+/* Orb                                                                 */
+/* ------------------------------------------------------------------ */
+(function orb(){
+  const c = $('orb'), g = c.getContext('2d');
+  let W=0,H=0,dpr=1,t=0;
+  function fit(){
+    dpr = Math.min(devicePixelRatio||1, 2);
+    W = c.clientWidth; H = c.clientHeight;
+    c.width = W*dpr; c.height = H*dpr; g.setTransform(dpr,0,0,dpr,0,0);
+  }
+  addEventListener('resize', fit); fit();
+
+  function draw(){
+    t += 0.016;
+    // sample live audio energy
+    if (analyser && freq){
+      analyser.getByteFrequencyData(freq);
+      let s=0; for (let i=0;i<freq.length;i++) s+=freq[i];
+      spkLevel += ((s/freq.length/128) - spkLevel) * 0.28;
+    } else spkLevel *= 0.9;
+
+    const col = COLORS[state] || '#38e8ff';
+    const base = Math.min(W,H)*0.30;
+    let energy = 0;
+    if (state==='listening') energy = micLevel*1.5;
+    else if (state==='speaking') energy = spkLevel*1.1;
+    else if (state==='thinking') energy = 0.20 + Math.sin(t*7)*0.10;
+    energy = Math.min(energy, 1.1);
+
+    g.clearRect(0,0,W,H);
+    const cx=W/2, cy=H/2;
+    const pulse = 1 + Math.sin(t*1.5)*0.03 + energy*0.30;
+    const R = base*pulse;
+
+    // outer glow
+    const glow = g.createRadialGradient(cx,cy,R*0.2,cx,cy,R*2.1);
+    glow.addColorStop(0, hex(col, .45 + energy*.35));
+    glow.addColorStop(.45, hex(col, .10));
+    glow.addColorStop(1, hex(col, 0));
+    g.fillStyle = glow; g.beginPath(); g.arc(cx,cy,R*2.1,0,7); g.fill();
+
+    // core sphere
+    const core = g.createRadialGradient(cx-R*.3, cy-R*.35, R*.05, cx, cy, R);
+    core.addColorStop(0, hex('#ffffff', .95));
+    core.addColorStop(.30, hex(col, .80));
+    core.addColorStop(.75, hex(col, .22));
+    core.addColorStop(1, hex(col, .04));
+    g.fillStyle = core; g.beginPath(); g.arc(cx,cy,R,0,7); g.fill();
+
+    // reactive waveform rings
+    for (let k=0;k<3;k++){
+      g.beginPath();
+      const rr = R*(1.10 + k*0.16);
+      const amp = R*(0.035 + energy*0.20)/(k*0.6+1);
+      for (let a=0;a<=64;a++){
+        const th = a/64*Math.PI*2;
+        const n = Math.sin(th*(3+k) + t*(1.8+k*0.7)) * amp
+                + Math.sin(th*(7-k) - t*(2.4+k)) * amp*0.5;
+        const x = cx + Math.cos(th)*(rr+n), y = cy + Math.sin(th)*(rr+n);
+        a ? g.lineTo(x,y) : g.moveTo(x,y);
+      }
+      g.closePath();
+      g.strokeStyle = hex(col, (.34 - k*.09) * (0.5 + energy));
+      g.lineWidth = 1.2; g.stroke();
+    }
+
+    // orbiting particles
+    for (let i=0;i<18;i++){
+      const th = t*0.35 + i*(Math.PI*2/18);
+      const rr = R*(1.5 + Math.sin(t*1.1+i)*0.16);
+      const x = cx + Math.cos(th)*rr, y = cy + Math.sin(th)*rr*0.42;
+      g.fillStyle = hex(col, .30 + energy*.4);
+      g.beginPath(); g.arc(x,y, 1.1 + energy*1.4, 0, 7); g.fill();
+    }
+
+    requestAnimationFrame(draw);
+  }
+  function hex(h,a){
+    const n = parseInt(h.slice(1),16);
+    return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+Math.max(0,Math.min(1,a))+')';
+  }
+  draw();
+})();
+
+/* ------------------------------------------------------------------ */
+/* Audio helpers                                                       */
+/* ------------------------------------------------------------------ */
+function b64ToBytes(b64){
+  const bin = atob(b64), out = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes){
+  let s=''; const CH=0x8000;
+  for (let i=0;i<bytes.length;i+=CH) s += String.fromCharCode.apply(null, bytes.subarray(i,i+CH));
+  return btoa(s);
+}
+
+/* Mic capture worklet: downsamples to 16 kHz mono int16 and reports level. */
+const WORKLET_SRC = `
+class MicProc extends AudioWorkletProcessor {
+  constructor(){ super(); this.ratio = sampleRate / ${MIC_RATE}; this.pos = 0; this.buf = []; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    let peak = 0;
+    for (let i=0;i<ch.length;i++){ const v = Math.abs(ch[i]); if (v>peak) peak=v; }
+    // linear-interpolated resample to 16k
+    while (this.pos < ch.length){
+      const i0 = Math.floor(this.pos), frac = this.pos - i0;
+      const a = ch[i0], b = (i0+1 < ch.length) ? ch[i0+1] : ch[ch.length-1];
+      let s = a + (b-a)*frac;
+      s = Math.max(-1, Math.min(1, s));
+      this.buf.push(s < 0 ? s*0x8000 : s*0x7fff);
+      this.pos += this.ratio;
+    }
+    this.pos -= ch.length;
+    if (this.buf.length >= 640){            // ~40 ms packets
+      const pcm = new Int16Array(this.buf.splice(0, this.buf.length));
+      this.port.postMessage({ pcm: pcm.buffer, peak }, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('mic-proc', MicProc);
+`;
+
+/* ------------------------------------------------------------------ */
+/* Session lifecycle                                                   */
+/* ------------------------------------------------------------------ */
+async function startSession(){
+  if (active) return;
+  setSession(true); setState('connecting');
+  greeted = false; liveUser = liveAI = null;
+
+  // 1) microphone
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true, channelCount:1 }
+    });
+  } catch (e){
+    console.error('mic', e);
+    fail(e && e.name === 'NotAllowedError'
+      ? 'Please allow microphone access for JARVIS, then tap again.'
+      : 'No microphone was found. Connect one and try again.');
+    return;
+  }
+
+  // 2) ephemeral token from the backend (real key never reaches the browser)
+  let auth;
+  try {
+    auth = await getToken();
+  } catch (e){
+    console.error('token', e);
+    fail(e.message || "I couldn't connect to JARVIS's AI service.");
+    return;
+  }
+
+  // 3) audio graph
+  try { await buildAudio(); } catch(e){ console.error('audio', e); fail('Audio could not be initialised on this browser.'); return; }
+
+  // 4) realtime socket
+  openSocket(auth);
+}
+
+function fail(msg){
+  showError(msg);
+  setState('error');
+  els.hint.textContent = msg;
+  stopSession(true);
+  setTimeout(()=>{ if(!active) setState('idle'); els.hint.textContent = HINTS.idle; }, 4500);
+}
+
+async function getToken(){
+  if (!BACKEND_URL || BACKEND_URL.indexOf('PASTE_YOUR') === 0)
+    throw new Error('JARVIS is not configured yet — add your backend URL.');
+  const r = await fetch(BACKEND_URL + (BACKEND_URL.includes('?')?'&':'?') + 'action=token&t=' + Date.now());
+  if (!r.ok) throw new Error("I couldn't connect to JARVIS's AI service.");
+  const d = await r.json();
+  if (!d.ok || !d.token) throw new Error(d.error || 'JARVIS is temporarily unavailable. Please try again.');
+  return d;
+}
+
+async function buildAudio(){
+  const AC = window.AudioContext || window.webkitAudioContext;
+
+  outCtx = new AC({ sampleRate: OUT_RATE, latencyHint:'interactive' });
+  await outCtx.resume();
+  outGain  = outCtx.createGain();
+  analyser = outCtx.createAnalyser();
+  analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.6;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  outGain.connect(analyser); analyser.connect(outCtx.destination);
+  playHead = outCtx.currentTime;
+
+  micCtx = new AC({ latencyHint:'interactive' });
+  await micCtx.resume();
+  const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type:'application/javascript' }));
+  await micCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  micSource = micCtx.createMediaStreamSource(micStream);
+  micNode = new AudioWorkletNode(micCtx, 'mic-proc', { numberOfInputs:1, numberOfOutputs:0 });
+  micNode.port.onmessage = ev => {
+    micLevel += (ev.data.peak - micLevel) * 0.35;
+    if (ws && ws.readyState === 1){
+      ws.send(JSON.stringify({
+        realtimeInput:{ audio:{ mimeType:'audio/pcm;rate=' + MIC_RATE, data: bytesToB64(new Uint8Array(ev.data.pcm)) } }
+      }));
+    }
+  };
+  micSource.connect(micNode);
+}
+
+function openSocket(auth){
+  const url = WS_HOST + WS_PATH(auth.apiVersion || 'v1alpha') + '?access_token=' + encodeURIComponent(auth.token);
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    // The token already carries the full locked setup (model, persona, voice,
+    // VAD, tools). We still must send a setup frame first; an empty one means
+    // "use the constraints baked into the token".
+    ws.send(JSON.stringify({ setup:{} }));
+  };
+
+  ws.onmessage = async ev => {
+    let raw = ev.data;
+    if (raw instanceof Blob) raw = await raw.text();
+    else if (raw instanceof ArrayBuffer) raw = new TextDecoder().decode(raw);
+    let m; try { m = JSON.parse(raw); } catch(e){ return; }
+    handleServer(m);
+  };
+
+  ws.onerror = e => { console.error('ws', e); };
+
+  ws.onclose = ev => {
+    console.warn('ws closed', ev.code, ev.reason);
+    if (!active) return;
+    if (ev.code === 1007 || ev.code === 1008 || ev.code === 1011){
+      fail(ev.reason && /quota|resource/i.test(ev.reason)
+        ? 'JARVIS is at its free usage limit. Try again shortly.'
+        : 'JARVIS lost its connection. Tap to reconnect.');
+    } else {
+      fail('JARVIS lost its connection. Tap to reconnect.');
+    }
+  };
+}
+
+function handleServer(m){
+  if (m.setupComplete){
+    setState('listening');
+    if (!greeted){
+      greeted = true;
+      // One single greeting for the whole session.
+      ws.send(JSON.stringify({
+        clientContent:{
+          turns:[{ role:'user', parts:[{ text:'(The session just opened. Greet me once, in under eight words, as JARVIS. Then stop.)' }] }],
+          turnComplete:true
+        }
+      }));
+    }
+    return;
+  }
+
+  const sc = m.serverContent;
+  if (!sc) return;
+
+  // barge-in: the model cancelled its own turn because we started talking
+  if (sc.interrupted){
+    flushPlayback();
+    seal(liveAI); liveAI = null;
+    setState('listening');
+    return;
+  }
+
+  // our speech, transcribed by the server
+  if (sc.inputTranscription && sc.inputTranscription.text){
+    if (!liveUser){ seal(liveAI); liveAI = null; liveUser = addMsg('me','',true); }
+    appendTo(liveUser, sc.inputTranscription.text);
+    if (state !== 'speaking') setState('listening');
+  }
+
+  // JARVIS's own words
+  if (sc.outputTranscription && sc.outputTranscription.text){
+    if (liveUser){ seal(liveUser); liveUser = null; }
+    if (!liveAI) liveAI = addMsg('ai','',true);
+    appendTo(liveAI, sc.outputTranscription.text);
+  }
+
+  const parts = (sc.modelTurn && sc.modelTurn.parts) || [];
+  for (const p of parts){
+    const d = p.inlineData;
+    if (d && d.mimeType && d.mimeType.indexOf('audio/pcm') === 0){
+      if (liveUser){ seal(liveUser); liveUser = null; }
+      enqueue(d.data);
+    }
+  }
+  if (parts.length && state !== 'speaking') setState('speaking');
+
+  if (sc.generationComplete && !playing) setState('listening');
+  if (sc.turnComplete){
+    seal(liveAI); liveAI = null;
+    if (!playing) setState('listening');
+  }
+}
+
+/* ---- streaming playback: schedule chunks back-to-back, no gaps ---- */
+function enqueue(b64){
+  if (!outCtx) return;
+  const bytes = b64ToBytes(b64);
+  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength>>1);
+  if (!pcm.length) return;
+  const buf = outCtx.createBuffer(1, pcm.length, OUT_RATE);
+  const ch = buf.getChannelData(0);
+  for (let i=0;i<pcm.length;i++) ch[i] = pcm[i] / 32768;
+
+  const now = outCtx.currentTime;
+  if (playHead < now + 0.04) playHead = now + 0.04;   // small joint buffer
+  const src = outCtx.createBufferSource();
+  src.buffer = buf; src.connect(outGain);
+  src.start(playHead);
+  playHead += buf.duration;
+  playing++;
+  liveNodes.push(src);
+  setState('speaking');
+  src.onended = () => {
+    playing = Math.max(0, playing-1);
+    liveNodes = liveNodes.filter(n => n !== src);
+    if (!playing && active && state === 'speaking') setState('listening');
+  };
+}
+function flushPlayback(){
+  liveNodes.forEach(n => { try{ n.onended=null; n.stop(); }catch(e){} });
+  liveNodes = []; playing = 0;
+  if (outCtx) playHead = outCtx.currentTime;
+}
+
+function stopSession(silent){
+  setSession(false);
+  flushPlayback();
+  try { if (ws){ ws.onclose = null; ws.close(); } } catch(e){}
+  ws = null;
+  try { if (micNode){ micNode.port.onmessage = null; micNode.disconnect(); } } catch(e){}
+  try { if (micSource) micSource.disconnect(); } catch(e){}
+  try { if (micStream) micStream.getTracks().forEach(t=>t.stop()); } catch(e){}
+  try { if (micCtx) micCtx.close(); } catch(e){}
+  try { if (outCtx) outCtx.close(); } catch(e){}
+  micNode = micSource = micStream = micCtx = outCtx = analyser = outGain = null;
+  freq = null; micLevel = 0; spkLevel = 0;
+  seal(liveUser); seal(liveAI); liveUser = liveAI = null;
+  if (!silent){ setState('idle'); els.hint.textContent = HINTS.idle; }
+}
+
+/* ------------------------------------------------------------------ */
+els.mic.addEventListener('click', () => { active ? stopSession(false) : startSession(); });
+addEventListener('keydown', e => {
+  if (e.code === 'Space' && e.target === document.body){ e.preventDefault(); els.mic.click(); }
+});
+addEventListener('beforeunload', () => stopSession(true));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && active) stopSession(false);
+});
+</script>
+</body>
+</html>
