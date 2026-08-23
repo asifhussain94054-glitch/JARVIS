@@ -176,12 +176,208 @@ const els = { status:$('status'), hint:$('hint'), log:$('log'), mic:$('mic'), se
 let state = 'idle';         // idle | connecting | listening | thinking | speaking | error
 let active = false;
 let ws = null, micCtx = null, outCtx = null, micStream = null, micNode = null, micSource = null;
+let liveSetupReady = false;              // no realtimeInput until setupComplete
+let liveSocketOpenedAt = null;
+let liveSetupCompletedAt = null;
 let outGain = null, analyser = null, freq = null;
 let playHead = 0, playing = 0;          // scheduled-chunk bookkeeping
 let liveNodes = [];                      // currently scheduled buffer sources
 let micLevel = 0, spkLevel = 0;
 let liveUser = null, liveAI = null;      // streaming transcript elements
 let greeted = false;
+
+/* ------------------------------------------------------------------ */
+/* Temporary one-turn latency diagnostics                              */
+/* ------------------------------------------------------------------ */
+// This is intentionally observation-only. It does not perform VAD or alter
+// the audio path; the peak threshold is used only to label one test utterance.
+const LATENCY_DIAGNOSTICS = true;
+const DIAG_SPEECH_THRESHOLD = 0.025;
+const DIAG_SILENCE_PACKETS = 3;
+let latencyTurn = null;
+let latencyPacketSeq = 0;
+let latencyReportTimer = null;
+
+function latencyStartTurn(at, peak, packetSeq){
+  if (!LATENCY_DIAGNOSTICS || latencyTurn) return;
+  latencyTurn = {
+    speechStartAt: at,
+    speechStartPeak: peak,
+    socketOpenedAt: liveSocketOpenedAt,
+    setupCompleteAt: liveSetupCompletedAt,
+    firstPcmAt: null,
+    firstPcmSentAt: null,
+    firstPcmSeq: null,
+    lastPcmAt: null,
+    lastPcmSentAt: null,
+    lastPcmSeq: null,
+    speechEndAt: null,
+    inputTranscriptReceivedAt: null,
+    lastInputTranscriptAt: null,
+    inputTranscriptEvents: 0,
+    userTextRenderedAt: null,
+    generationStartAt: null,
+    turnCompleteAt: null,
+    firstAudioReceivedAt: null,
+    firstAudioPlayedAt: null,
+    packets: 0,
+    speechPackets: 0,
+    sentPackets: 0,
+    droppedPackets: 0,
+    droppedBeforeSocket: 0,
+    droppedBeforeSetup: 0,
+    maxBufferedAmount: 0,
+    serverEvents: 0,
+    maxWsToHandlerMs: 0,
+    maxServerHandlerMs: 0,
+    sendIntervals: [],
+    lastPacketAt: null,
+    lastSentAt: null,
+    silencePackets: 0,
+    inputText: '',
+    reportPrinted: false,
+    firstSpeechPacketSeq: packetSeq
+  };
+  console.debug('[JARVIS LATENCY] speech_start:', at.toFixed(1) + 'ms',
+    '(client peak ' + peak.toFixed(4) + ', diagnostic only)');
+}
+
+function latencyRecordMicPacket(at, peak, sentAt, packetSeq, dropReason, bufferedAmount){
+  if (!LATENCY_DIAGNOSTICS) return;
+  const speech = peak >= DIAG_SPEECH_THRESHOLD;
+  if (!latencyTurn && speech) latencyStartTurn(at, peak, packetSeq);
+  if (!latencyTurn) return;
+
+  const t = latencyTurn;
+  t.packets++;
+  if (Number.isFinite(bufferedAmount)) t.maxBufferedAmount = Math.max(t.maxBufferedAmount, bufferedAmount);
+  t.lastPacketAt = at;
+
+  if (sentAt === null){
+    t.droppedPackets++;
+    if (dropReason === 'socket') t.droppedBeforeSocket++;
+    if (dropReason === 'setup') t.droppedBeforeSetup++;
+  } else {
+    t.sentPackets++;
+    if (t.lastSentAt !== null) t.sendIntervals.push(sentAt - t.lastSentAt);
+    t.lastSentAt = sentAt;
+  }
+
+  if (speech){
+    t.speechPackets++;
+    t.silencePackets = 0;
+    t.speechEndAt = null;
+    if (t.firstPcmAt === null){
+      t.firstPcmAt = at;
+      t.firstPcmSentAt = sentAt;
+      t.firstPcmSeq = packetSeq;
+      console.debug('[JARVIS LATENCY] first_pcm_containing_speech:',
+        at.toFixed(1) + 'ms (packet ' + packetSeq + ')');
+      console.debug('[JARVIS LATENCY] first_pcm_sent:',
+        sentAt === null ? 'not sent' : sentAt.toFixed(1) + 'ms',
+        '(packet ' + packetSeq + ')');
+    }
+    t.lastPcmAt = at;
+    t.lastPcmSentAt = sentAt;
+    t.lastPcmSeq = packetSeq;
+  } else if (t.lastPcmAt !== null){
+    t.silencePackets++;
+    if (t.silencePackets === DIAG_SILENCE_PACKETS){
+      t.speechEndAt = t.lastPcmAt;
+      console.debug('[JARVIS LATENCY] last_pcm_before_silence:',
+        t.lastPcmAt.toFixed(1) + 'ms (packet ' + t.lastPcmSeq + ')');
+      console.debug('[JARVIS LATENCY] last_pcm_sent_before_silence:',
+        t.lastPcmSentAt === null ? 'not sent' : t.lastPcmSentAt.toFixed(1) + 'ms');
+    }
+  }
+}
+
+function latencyMark(name, at){
+  if (!LATENCY_DIAGNOSTICS || !latencyTurn || latencyTurn[name] !== null) return;
+  latencyTurn[name] = at === undefined ? performance.now() : at;
+}
+function latencyRecordServerHandler(startAt, wsReceivedAt){
+  if (!LATENCY_DIAGNOSTICS || !latencyTurn) return;
+  latencyTurn.serverEvents++;
+  latencyTurn.maxServerHandlerMs = Math.max(latencyTurn.maxServerHandlerMs, performance.now() - startAt);
+  if (wsReceivedAt !== undefined){
+    latencyTurn.maxWsToHandlerMs = Math.max(
+      latencyTurn.maxWsToHandlerMs, startAt - wsReceivedAt
+    );
+  }
+}
+
+function latencyDelta(later, earlier){
+  return later === null || earlier === null ? null : later - earlier;
+}
+function latencyMs(value){
+  return value === null || !Number.isFinite(value) ? 'n/a' : value.toFixed(1) + 'ms';
+}
+function latencyDelay(later, earlier){
+  const d = latencyDelta(later, earlier);
+  return d === null ? 'n/a' : latencyMs(d);
+}
+function latencyAudioPerfAt(contextTime, ctx){
+  if (!ctx) return performance.now();
+  return performance.now() + (contextTime - ctx.currentTime) * 1000;
+}
+
+function printLatencyReport(){
+  if (!LATENCY_DIAGNOSTICS || !latencyTurn || latencyTurn.reportPrinted) return;
+  latencyTurn.reportPrinted = true;
+  const t = latencyTurn;
+  const speechEnd = t.speechEndAt || t.lastPcmAt;
+  const cadence = t.sendIntervals.length
+    ? t.sendIntervals.reduce((a,b) => a+b, 0) / t.sendIntervals.length
+    : null;
+  const minCadence = t.sendIntervals.length ? Math.min(...t.sendIntervals) : null;
+  const maxCadence = t.sendIntervals.length ? Math.max(...t.sendIntervals) : null;
+  const report = [
+    '[JARVIS LATENCY]',
+    'speech_start: ' + latencyMs(t.speechStartAt),
+    'websocket_open: ' + latencyMs(t.socketOpenedAt),
+    'setup_complete: ' + latencyMs(t.setupCompleteAt),
+    'first_pcm_callback: ' + latencyMs(t.firstPcmAt),
+    'first_pcm_sent: ' + latencyMs(t.firstPcmSentAt),
+    'last_pcm_before_silence: ' + latencyMs(t.lastPcmAt),
+    'last_pcm_sent_before_silence: ' + latencyMs(t.lastPcmSentAt),
+    'input_transcript_received: ' + latencyMs(t.inputTranscriptReceivedAt),
+    'input_transcript_events: ' + t.inputTranscriptEvents,
+    'user_text_rendered: ' + latencyMs(t.userTextRenderedAt),
+    'speech_end (client estimate): ' + latencyMs(speechEnd),
+    'generation_start (first modelTurn): ' + latencyMs(t.generationStartAt),
+    'turn_complete: ' + latencyMs(t.turnCompleteAt),
+    'first_response_audio_received: ' + latencyMs(t.firstAudioReceivedAt),
+    'first_audio_played: ' + latencyMs(t.firstAudioPlayedAt),
+    '',
+    'delays:',
+    'speech -> first PCM: ' + latencyDelay(t.firstPcmAt, t.speechStartAt),
+    'speech -> first PCM sent: ' + latencyDelay(t.firstPcmSentAt, t.speechStartAt),
+    'PCM sent -> input transcript: ' + latencyDelay(t.inputTranscriptReceivedAt, t.firstPcmSentAt),
+    'input transcript -> UI: ' + latencyDelay(t.userTextRenderedAt, t.inputTranscriptReceivedAt),
+    'speech end -> turn complete: ' + latencyDelay(t.turnCompleteAt, speechEnd),
+    'turn complete -> first audio: ' + latencyDelay(t.firstAudioReceivedAt, t.turnCompleteAt),
+    'first audio received -> first audio played: ' + latencyDelay(t.firstAudioPlayedAt, t.firstAudioReceivedAt),
+    '',
+    'audio packets: ' + t.sentPackets + ' sent, ' + t.droppedPackets + ' not sent',
+    'not sent: ' + t.droppedBeforeSetup + ' before setupComplete, ' + t.droppedBeforeSocket + ' before WebSocket OPEN',
+    'send cadence: average ' + latencyMs(cadence) + ', min ' + latencyMs(minCadence) + ', max ' + latencyMs(maxCadence),
+    'max WebSocket bufferedAmount: ' + t.maxBufferedAmount + ' bytes',
+    'serverContent events: ' + t.serverEvents + ', max WS receive -> handler: ' + latencyMs(t.maxWsToHandlerMs),
+    'max server event handler time: ' + latencyMs(t.maxServerHandlerMs),
+    'diagnostic source: client mic peak >= ' + DIAG_SPEECH_THRESHOLD
+  ].join('\n');
+  window.__JARVIS_LATENCY_LAST_TURN__ = t;
+  console.info(report);
+}
+
+function latencyScheduleReport(){
+  if (!LATENCY_DIAGNOSTICS || !latencyTurn || latencyTurn.turnCompleteAt === null) return;
+  clearTimeout(latencyReportTimer);
+  // Input transcription is documented as independently ordered, so leave a
+  // short observation window after turnComplete before printing the report.
+  latencyReportTimer = setTimeout(printLatencyReport, 1200);
+}
 
 /* ------------------------------------------------------------------ */
 /* UI                                                                  */
@@ -228,8 +424,20 @@ function addMsg(who, text, live){
 function appendTo(el, text){
   el.lastChild.textContent += text;
   els.log.scrollTop = els.log.scrollHeight;
+  if (el && el.classList.contains('me')){
+    const firstRender = latencyTurn && latencyTurn.userTextRenderedAt === null;
+    latencyMark('userTextRenderedAt');
+    if (firstRender) console.debug('[JARVIS LATENCY] user_text_rendered:',
+      latencyTurn.userTextRenderedAt.toFixed(1) + 'ms');
+  }
 }
 function seal(el){ if (el) el.classList.remove('live'); }
+function renderInputTranscript(text){
+  if (!text) return;
+  if (!liveUser){ seal(liveAI); liveAI = null; liveUser = addMsg('me','',true); }
+  appendTo(liveUser, text);
+  if (state !== 'speaking') setState('listening');
+}
 
 /* ------------------------------------------------------------------ */
 /* Orb                                                                 */
@@ -333,12 +541,13 @@ function bytesToB64(bytes){
 /* Mic capture worklet: downsamples to 16 kHz mono int16 and reports level. */
 const WORKLET_SRC = `
 class MicProc extends AudioWorkletProcessor {
-  constructor(){ super(); this.ratio = sampleRate / ${MIC_RATE}; this.pos = 0; this.buf = []; }
+  constructor(){ super(); this.ratio = sampleRate / ${MIC_RATE}; this.pos = 0; this.buf = []; this.packetPeak = 0; }
   process(inputs){
     const ch = inputs[0] && inputs[0][0];
     if (!ch) return true;
     let peak = 0;
     for (let i=0;i<ch.length;i++){ const v = Math.abs(ch[i]); if (v>peak) peak=v; }
+    this.packetPeak = Math.max(this.packetPeak, peak);
     // linear-interpolated resample to 16k
     while (this.pos < ch.length){
       const i0 = Math.floor(this.pos), frac = this.pos - i0;
@@ -349,9 +558,10 @@ class MicProc extends AudioWorkletProcessor {
       this.pos += this.ratio;
     }
     this.pos -= ch.length;
-    if (this.buf.length >= 640){            // ~40 ms packets
+    if (this.buf.length >= 320){            // ~20 ms packets
       const pcm = new Int16Array(this.buf.splice(0, this.buf.length));
-      this.port.postMessage({ pcm: pcm.buffer, peak }, [pcm.buffer]);
+      this.port.postMessage({ pcm: pcm.buffer, peak: this.packetPeak }, [pcm.buffer]);
+      this.packetPeak = 0;
     }
     return true;
   }
@@ -366,6 +576,12 @@ async function startSession(){
   if (active) return;
   setSession(true); setState('connecting');
   greeted = false; liveUser = liveAI = null;
+  clearTimeout(latencyReportTimer);
+  latencyReportTimer = null;
+  latencyTurn = null;
+  latencyPacketSeq = 0;
+  liveSocketOpenedAt = null;
+  liveSetupCompletedAt = null;
 
   // 1) microphone
   try {
@@ -435,22 +651,40 @@ async function buildAudio(){
   micSource = micCtx.createMediaStreamSource(micStream);
   micNode = new AudioWorkletNode(micCtx, 'mic-proc', { numberOfInputs:1, numberOfOutputs:0 });
   micNode.port.onmessage = ev => {
-    micLevel += (ev.data.peak - micLevel) * 0.35;
-    if (ws && ws.readyState === 1){
-      ws.send(JSON.stringify({
+    const packetAt = performance.now();
+    const packetSeq = ++latencyPacketSeq;
+    const peak = Number(ev.data.peak) || 0;
+    micLevel += (peak - micLevel) * 0.35;
+    let wsSendAt = null;
+    let bufferedAmount = null;
+    let dropReason = null;
+    if (ws && ws.readyState === 1 && liveSetupReady){
+      const message = JSON.stringify({
         realtimeInput:{ audio:{ mimeType:'audio/pcm;rate=' + MIC_RATE, data: bytesToB64(new Uint8Array(ev.data.pcm)) } }
-      }));
+      });
+      wsSendAt = performance.now();
+      ws.send(message);
+      bufferedAmount = ws.bufferedAmount;
+    } else {
+      // The worklet starts before the handshake; Gemini requires setupComplete
+      // before accepting any realtimeInput, so pre-handshake audio is ignored.
+      dropReason = !ws || ws.readyState !== 1 ? 'socket' : 'setup';
     }
+    latencyRecordMicPacket(packetAt, peak, wsSendAt, packetSeq, dropReason, bufferedAmount);
   };
   micSource.connect(micNode);
 }
 
 function openSocket(auth){
   const url = WS_HOST + WS_PATH(auth.apiVersion || 'v1alpha') + '?access_token=' + encodeURIComponent(auth.token);
+  liveSetupReady = false;
+  liveSocketOpenedAt = null;
+  liveSetupCompletedAt = null;
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
+    liveSocketOpenedAt = performance.now();
     // The token already carries the full locked setup (model, persona, voice,
     // VAD, tools). We still must send a setup frame first; an empty one means
     // "use the constraints baked into the token".
@@ -458,16 +692,18 @@ function openSocket(auth){
   };
 
   ws.onmessage = async ev => {
+    const wsReceivedAt = performance.now();
     let raw = ev.data;
     if (raw instanceof Blob) raw = await raw.text();
     else if (raw instanceof ArrayBuffer) raw = new TextDecoder().decode(raw);
     let m; try { m = JSON.parse(raw); } catch(e){ return; }
-    handleServer(m);
+    handleServer(m, wsReceivedAt);
   };
 
   ws.onerror = e => { console.error('ws', e); };
 
   ws.onclose = ev => {
+    liveSetupReady = false;
     console.warn('ws closed', ev.code, ev.reason);
     if (!active) return;
     if (ev.code === 1007 || ev.code === 1008 || ev.code === 1011){
@@ -480,8 +716,14 @@ function openSocket(auth){
   };
 }
 
-function handleServer(m){
+function handleServer(m, wsReceivedAt){
   if (m.setupComplete){
+    // The protocol requires this acknowledgement before any realtimeInput.
+    liveSetupCompletedAt = performance.now();
+    liveSetupReady = true;
+    if (latencyTurn && latencyTurn.setupCompleteAt === null){
+      latencyTurn.setupCompleteAt = liveSetupCompletedAt;
+    }
     setState('listening');
     if (!greeted){
       greeted = true;
@@ -498,20 +740,52 @@ function handleServer(m){
 
   const sc = m.serverContent;
   if (!sc) return;
+  const handlerStartedAt = performance.now();
+  const serverEventAt = wsReceivedAt === undefined ? handlerStartedAt : wsReceivedAt;
+
+  // Input transcription is independently ordered from model/audio events.
+  if (sc.inputTranscription && sc.inputTranscription.text){
+    const firstInputEvent = latencyTurn && latencyTurn.inputTranscriptReceivedAt === null;
+    latencyMark('inputTranscriptReceivedAt', serverEventAt);
+    if (latencyTurn){
+      latencyTurn.inputText += sc.inputTranscription.text;
+      latencyTurn.lastInputTranscriptAt = serverEventAt;
+      latencyTurn.inputTranscriptEvents++;
+    }
+    if (firstInputEvent) console.debug('[JARVIS LATENCY] input_transcript_received:',
+      serverEventAt.toFixed(1) + 'ms');
+    latencyScheduleReport();
+  }
+  if (sc.modelTurn && sc.modelTurn.parts && sc.modelTurn.parts.length){
+    const firstGenerationEvent = latencyTurn && latencyTurn.generationStartAt === null;
+    latencyMark('generationStartAt', serverEventAt);
+    if (firstGenerationEvent) console.debug('[JARVIS LATENCY] generation_start (first modelTurn):',
+      serverEventAt.toFixed(1) + 'ms');
+  }
+  if (sc.turnComplete){
+    const firstTurnComplete = latencyTurn && latencyTurn.turnCompleteAt === null;
+    latencyMark('turnCompleteAt', serverEventAt);
+    if (firstTurnComplete) console.debug('[JARVIS LATENCY] turn_complete:',
+      serverEventAt.toFixed(1) + 'ms');
+    latencyScheduleReport();
+  }
 
   // barge-in: the model cancelled its own turn because we started talking
   if (sc.interrupted){
     flushPlayback();
     seal(liveAI); liveAI = null;
+    if (sc.inputTranscription && sc.inputTranscription.text){
+      renderInputTranscript(sc.inputTranscription.text);
+    }
     setState('listening');
+    latencyRecordServerHandler(handlerStartedAt, wsReceivedAt);
     return;
   }
 
-  // our speech, transcribed by the server
-  if (sc.inputTranscription && sc.inputTranscription.text){
-    if (!liveUser){ seal(liveAI); liveAI = null; liveUser = addMsg('me','',true); }
-    appendTo(liveUser, sc.inputTranscription.text);
-    if (state !== 'speaking') setState('listening');
+  // our speech, transcribed by the server. Render each delta immediately;
+  // this also runs for a message that carries interrupted (barge-in).
+  if (!sc.interrupted && sc.inputTranscription && sc.inputTranscription.text){
+    renderInputTranscript(sc.inputTranscription.text);
   }
 
   // JARVIS's own words
@@ -526,7 +800,7 @@ function handleServer(m){
     const d = p.inlineData;
     if (d && d.mimeType && d.mimeType.indexOf('audio/pcm') === 0){
       if (liveUser){ seal(liveUser); liveUser = null; }
-      enqueue(d.data);
+      enqueue(d.data, serverEventAt);
     }
   }
   if (parts.length && state !== 'speaking') setState('speaking');
@@ -536,14 +810,20 @@ function handleServer(m){
     seal(liveAI); liveAI = null;
     if (!playing) setState('listening');
   }
+  latencyRecordServerHandler(handlerStartedAt, wsReceivedAt);
 }
 
 /* ---- streaming playback: schedule chunks back-to-back, no gaps ---- */
-function enqueue(b64){
+function enqueue(b64, receivedAt){
   if (!outCtx) return;
+  const audioReceivedAt = receivedAt === undefined ? performance.now() : receivedAt;
   const bytes = b64ToBytes(b64);
   const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength>>1);
   if (!pcm.length) return;
+  const firstAudio = latencyTurn && latencyTurn.firstAudioReceivedAt === null;
+  latencyMark('firstAudioReceivedAt', audioReceivedAt);
+  if (firstAudio) console.debug('[JARVIS LATENCY] first_response_audio_received:',
+    audioReceivedAt.toFixed(1) + 'ms');
   const buf = outCtx.createBuffer(1, pcm.length, OUT_RATE);
   const ch = buf.getChannelData(0);
   for (let i=0;i<pcm.length;i++) ch[i] = pcm[i] / 32768;
@@ -552,8 +832,17 @@ function enqueue(b64){
   if (playHead < now + 0.04) playHead = now + 0.04;   // small joint buffer
   const src = outCtx.createBufferSource();
   src.buffer = buf; src.connect(outGain);
-  src.start(playHead);
+  const firstScheduledAt = playHead;
+  src.start(firstScheduledAt);
   playHead += buf.duration;
+  if (latencyTurn && latencyTurn.firstAudioPlayedAt === null){
+    // AudioBufferSourceNode has no onstart callback. Map its audio-clock start
+    // to performance.now(); this is the first audible-sample estimate.
+    latencyMark('firstAudioPlayedAt', latencyAudioPerfAt(firstScheduledAt, outCtx));
+    console.debug('[JARVIS LATENCY] first_audio_played:',
+      latencyTurn.firstAudioPlayedAt.toFixed(1) + 'ms (audio-clock estimate)');
+    latencyScheduleReport();
+  }
   playing++;
   liveNodes.push(src);
   setState('speaking');
@@ -574,6 +863,7 @@ function stopSession(silent){
   flushPlayback();
   try { if (ws){ ws.onclose = null; ws.close(); } } catch(e){}
   ws = null;
+  liveSetupReady = false;
   try { if (micNode){ micNode.port.onmessage = null; micNode.disconnect(); } } catch(e){}
   try { if (micSource) micSource.disconnect(); } catch(e){}
   try { if (micStream) micStream.getTracks().forEach(t=>t.stop()); } catch(e){}
