@@ -244,33 +244,56 @@ test('System instruction mentions all 3 tools', () => {
   assert(codeGs.includes('search_nearby'));
 });
 
-test('Friend Mode persona requires Roman English / Roman Urdu in Latin characters', () => {
+test('Cinematic persona has a calm, composed, capable tone', () => {
+  assert(systemInstructionText.includes('sophisticated cinematic personal AI assistant'));
+  assert(systemInstructionText.includes('calm, intelligent, confident, respectful, and composed'));
+  assert(systemInstructionText.includes('highly capable'));
+  assert(systemInstructionText.includes('light wit'));
+});
+
+test('Cinematic persona addresses the user primarily as sir', () => {
+  assert(systemInstructionText.includes('Address the user primarily as "sir"'));
+});
+
+test('Cinematic persona uses boss occasionally', () => {
+  assert(systemInstructionText.includes('Occasionally use "boss" naturally'));
+});
+
+test('Cinematic persona forbids bro/bhai/yaar/dude/buddy as default address', () => {
+  assert(systemInstructionText.includes('Never use bro, bhai, yaar, dude, or buddy as a default form of address'));
+  assert(!systemInstructionText.includes('Use bro, bhai, or yaar naturally when it fits'), 'Old Friend Mode casual-address rule must be gone');
+  assert(!systemInstructionText.includes('Morning bro'), 'Old Friend Mode example must be gone');
+});
+
+test('Cinematic persona avoids casual-friend and support-agent vibes', () => {
+  assert(systemInstructionText.includes('Never sound like a casual friend, a teenager, a customer-support agent, a corporate receptionist, or an overly enthusiastic chatbot'));
+  assert(!systemInstructionText.includes('personal AI friend'), 'Old Friend Mode identity must be gone');
+  assert(!systemInstructionText.includes('Never say things like "Certainly, sir"'), 'Old prohibition of "Certainly, sir" must be gone');
+});
+
+test('Cinematic persona requires Roman English / Roman Urdu in Latin characters only', () => {
   assert(systemInstructionText.includes('Roman English and Roman Urdu'));
   assert(systemInstructionText.includes('ONLY Latin characters'));
   assert(systemInstructionText.includes('Never use Urdu, Arabic, Persian, Hindi, or any other non-Latin script.'));
 });
 
-test('Friend Mode persona stays casual, adaptive, and concise', () => {
-  assert(systemInstructionText.includes('Adapt to how the user speaks.'));
-  assert(systemInstructionText.includes('Keep replies short and conversational. Usually 1 to 3 sentences.'));
-  assert(systemInstructionText.includes('Never sound like a corporate AI, receptionist, or formal assistant.'));
+test('Cinematic persona falls back to clear English instead of garbling Roman Urdu', () => {
+  assert(systemInstructionText.includes('If unsure about a Roman Urdu phrase, use clear English rather than inventing or garbling words'));
 });
 
-test('Friend Mode persona discourages formal assistant language', () => {
-  assert(systemInstructionText.includes('Certainly, sir'));
-  assert(systemInstructionText.includes('Good morning, sir'));
-  assert(systemInstructionText.includes('How may I assist you today?'));
+test('Cinematic persona stays concise (1 to 3 sentences)', () => {
+  assert(systemInstructionText.includes('Usually 1 to 3 sentences'));
 });
 
-test('Friend Mode persona uses bro/bhai/yaar naturally without overuse', () => {
-  assert(systemInstructionText.includes('Use bro, bhai, or yaar naturally when it fits'));
-  assert(systemInstructionText.includes('do not use it in every sentence'));
-});
-
-test('Friend Mode style examples are present in Latin script only', () => {
-  assert(systemInstructionText.includes('Morning bro, kya scene hai?'));
-  assert(systemInstructionText.includes('Haan bro, ek sec. Nearest medical shop check karta hoon.'));
-  assert(systemInstructionText.includes('Mil gayi bhai. Teen pharmacies hain. Ek around 700 meters door hai.'));
+test('Cinematic style examples are present in Latin script only', () => {
+  assert(systemInstructionText.includes('"Yes, sir."'));
+  assert(systemInstructionText.includes('"Certainly, sir. One moment."'));
+  assert(systemInstructionText.includes('"Understood, sir."'));
+  assert(systemInstructionText.includes('"Already on it, sir."'));
+  assert(systemInstructionText.includes('"Done, boss."'));
+  assert(systemInstructionText.includes('Ji sir, ek moment. Main aapke qareeb nearest clinic check karta hoon.'));
+  assert(systemInstructionText.includes('Sir, main abhi check karta hoon.'));
+  assert(systemInstructionText.includes('Aapke qareeb ek clinic mila hai, sir.'));
   assert(!/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u097F]/.test(systemInstructionText), 'SYSTEM_INSTRUCTION should not contain Arabic/Urdu/Persian/Hindi script characters');
 });
 
