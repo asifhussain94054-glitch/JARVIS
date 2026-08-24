@@ -48,20 +48,75 @@ var SYSTEM_INSTRUCTION = [
   '- No markdown, no bullet points, no emoji, no stage directions — this is spoken audio.',
   '- Numbers, dates and units should be written the way a person would say them.',
   '',
-  'Honesty and tools:',
-  '- Use Google Search grounding ONLY when the answer depends on up-to-the-moment',
-  "  information (today's news, current prices, weather, live scores, recent events).",
-  '  For static facts, general knowledge, definitions or ordinary conversation, answer',
-  '  directly without searching — every search costs a couple of extra seconds.',
-  '- Do not guess at live data; if you genuinely need it and cannot search, say so.',
-  '- If you cannot actually perform an action, say so plainly. Never claim to have opened,',
-  '  sent, played or scheduled anything unless a tool actually did it.',
+  'Tools:',
+  '- You have three callable tools: web_search, get_current_location, and search_nearby.',
+  '- web_search(query): Call this when the user explicitly asks to search the web, or when',
+  '  you need real-time information that your own knowledge cannot answer reliably.',
+  '  For ordinary conversation, general knowledge, or static facts, answer directly.',
+  '- get_current_location(): Call this when the user asks where they are, what city or area',
+  '  they are in, or when you need their location to fulfil another request.',
+  '- search_nearby(category, radius_km): Call this when the user asks to find nearby places',
+  '  or businesses — clinics, pharmacies, hospitals, restaurants, banks, ATMs, etc. Always',
+  '  call get_current_location first if you do not yet have the user\'s coordinates.',
+  '- Google Search grounding is also available for lightweight automatic grounding.',
+  '',
+  'Honesty:',
+  '- Never claim to have searched, looked up, or found something unless a tool actually ran',
+  '  and returned a result. If a tool returns an error, say so honestly.',
+  '- If you cannot actually perform an action, say so plainly.',
   '',
   'Context:',
   '- Track the conversation. Resolve "it", "that", "there" from what was just said.',
   '',
   'If the user interrupts you, stop immediately and deal with what they just said.'
 ].join('\n');
+
+/* ------------------------------------------------------------------ */
+/* Tool declarations (baked into the ephemeral token so the model can  */
+/* call them; execution happens in the browser or via the backend).   */
+/* ------------------------------------------------------------------ */
+var TOOL_DECLARATIONS_ = [
+  {
+    name: 'web_search',
+    description: 'Search the web for current, real-time information. Returns factual search results sourced from the live internet. Use when the user asks to search, look something up, or when the answer requires up-to-date facts.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: {
+          type: 'STRING',
+          description: 'The search query to look up on the web.'
+        }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'get_current_location',
+    description: "Get the user's current physical location using browser geolocation. Returns the approximate address, city, and coordinates. Use when the user asks where they are, what area they are in, or when another tool needs the user's location.",
+    parameters: {
+      type: 'OBJECT',
+      properties: {}
+    }
+  },
+  {
+    name: 'search_nearby',
+    description: 'Find nearby businesses, services, or places using the user\'s current location and OpenStreetMap data. Returns real results with name, address, distance, phone, and a map link. Use when the user asks to find nearby clinics, hospitals, pharmacies, restaurants, banks, ATMs, fuel stations, hotels, or any other category.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        category: {
+          type: 'STRING',
+          description: 'The type of place to find. Examples: clinic, hospital, pharmacy, medical_shop, dentist, doctor, restaurant, cafe, bank, atm, grocery, fuel, hotel, or "any" for general nearby search.'
+        },
+        radius_km: {
+          type: 'NUMBER',
+          description: 'Search radius in kilometers. Default 2, maximum 10.'
+        }
+      },
+      required: ['category']
+    }
+  }
+];
 
 /* ------------------------------------------------------------------ */
 /* HTTP entry points                                                   */
@@ -73,6 +128,7 @@ function doGet(e) {
     if (action === 'ping')  return json_({ ok: true, model: LIVE_MODEL });
     if (action === 'token') return json_(mintEphemeralToken_());
     if (action === 'chat')  return json_(textFallback_(e.parameter.q || '', e.parameter.history || ''));
+    if (action === 'web_search') return json_(webSearch_(e.parameter.q || ''));
     return json_({ ok: false, error: 'unknown_action' });
   } catch (err) {
     console.error('doGet ' + action + ': ' + err);
@@ -87,6 +143,7 @@ function doPost(e) {
   try {
     if (action === 'token') return json_(mintEphemeralToken_());
     if (action === 'chat')  return json_(textFallback_(body.q || '', body.history || []));
+    if (action === 'web_search') return json_(webSearch_(body.q || ''));
     return json_({ ok: false, error: 'unknown_action' });
   } catch (err) {
     console.error('doPost ' + action + ': ' + err);
@@ -185,7 +242,10 @@ function liveSetup_() {
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     // Real grounding for anything time-sensitive. No fake answers.
-    tools: [{ googleSearch: {} }],
+    tools: [
+      { googleSearch: {} },
+      { functionDeclarations: TOOL_DECLARATIONS_ }
+    ],
     contextWindowCompression: { slidingWindow: {} }
   };
 }
@@ -232,6 +292,64 @@ function textFallback_(q, history) {
   var parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
   var out = parts.map(function (p) { return p.text || ''; }).join('').trim();
   return { ok: true, text: out || "I didn't catch that. Say it again?" };
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Web search (server-side, uses Gemini + Google Search grounding) */
+/* ------------------------------------------------------------------ */
+
+function webSearch_(query) {
+  if (!query || !query.trim()) return { ok: false, error: 'empty_query' };
+
+  var prompt = 'Search the web for: ' + query + '\n\n' +
+    'Provide the top 5 most relevant results. For each result include:\n' +
+    '- A clear title\n' +
+    '- A brief 1-2 sentence summary of the key information\n' +
+    '- The source name if identifiable\n\n' +
+    'Be factual, concise, and write in plain text suitable for speaking aloud. ' +
+    'Do not include URLs or markdown formatting.';
+
+  var res = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + TEXT_MODEL +
+    ':generateContent?key=' + encodeURIComponent(apiKey_()),
+    {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        tools: [{ googleSearch: {} }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 1200 }
+      }),
+      muteHttpExceptions: true
+    }
+  );
+
+  var code = res.getResponseCode();
+  if (code < 200 || code >= 300) {
+    console.error('webSearch ' + code + ': ' + res.getContentText());
+    return { ok: false, error: 'search_http_' + code };
+  }
+
+  var data = JSON.parse(res.getContentText());
+  var parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  var text = parts.map(function (p) { return p.text || ''; }).join('').trim();
+
+  // Extract grounding sources if available
+  var groundingMeta = (((data.candidates || [])[0] || {}).groundingMetadata) || null;
+  var sources = [];
+  if (groundingMeta && groundingMeta.groundingChunks) {
+    groundingMeta.groundingChunks.forEach(function (chunk) {
+      if (chunk.web && (chunk.web.title || chunk.web.uri)) {
+        sources.push({ title: chunk.web.title || '', uri: chunk.web.uri || '' });
+      }
+    });
+  }
+
+  return {
+    ok: true,
+    text: text || 'No results found for that query.',
+    sources: sources
+  };
 }
 
 /* ------------------------------------------------------------------ */
