@@ -190,6 +190,11 @@ test('Medical shop includes pharmacy and medical_supply', () => {
 console.log('\n=== Code.gs Source Verification ===');
 
 const codeGs = fs.readFileSync(path.join(__dirname, 'Code.gs'), 'utf8');
+const systemInstructionMatch = codeGs.match(/var SYSTEM_INSTRUCTION = \[([\s\S]*?)\]\.join\('\\n'\);/);
+assert(systemInstructionMatch, 'Could not extract SYSTEM_INSTRUCTION from Code.gs');
+const systemInstructionText = Array.from(systemInstructionMatch[1].matchAll(/'((?:\\'|[^'])*)'/g))
+  .map(m => m[1].replace(/\\'/g, "'"))
+  .join('\n');
 
 test('TOOL_DECLARATIONS_ exists with 3 tools', () => {
   assert(codeGs.includes('var TOOL_DECLARATIONS_'));
@@ -237,6 +242,36 @@ test('System instruction mentions all 3 tools', () => {
   assert(codeGs.includes('web_search'));
   assert(codeGs.includes('get_current_location'));
   assert(codeGs.includes('search_nearby'));
+});
+
+test('Friend Mode persona requires Roman English / Roman Urdu in Latin characters', () => {
+  assert(systemInstructionText.includes('Roman English and Roman Urdu'));
+  assert(systemInstructionText.includes('ONLY Latin characters'));
+  assert(systemInstructionText.includes('Never use Urdu, Arabic, Persian, Hindi, or any other non-Latin script.'));
+});
+
+test('Friend Mode persona stays casual, adaptive, and concise', () => {
+  assert(systemInstructionText.includes('Adapt to how the user speaks.'));
+  assert(systemInstructionText.includes('Keep replies short and conversational. Usually 1 to 3 sentences.'));
+  assert(systemInstructionText.includes('Never sound like a corporate AI, receptionist, or formal assistant.'));
+});
+
+test('Friend Mode persona discourages formal assistant language', () => {
+  assert(systemInstructionText.includes('Certainly, sir'));
+  assert(systemInstructionText.includes('Good morning, sir'));
+  assert(systemInstructionText.includes('How may I assist you today?'));
+});
+
+test('Friend Mode persona uses bro/bhai/yaar naturally without overuse', () => {
+  assert(systemInstructionText.includes('Use bro, bhai, or yaar naturally when it fits'));
+  assert(systemInstructionText.includes('do not use it in every sentence'));
+});
+
+test('Friend Mode style examples are present in Latin script only', () => {
+  assert(systemInstructionText.includes('Morning bro, kya scene hai?'));
+  assert(systemInstructionText.includes('Haan bro, ek sec. Nearest medical shop check karta hoon.'));
+  assert(systemInstructionText.includes('Mil gayi bhai. Teen pharmacies hain. Ek around 700 meters door hai.'));
+  assert(!/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0900-\u097F]/.test(systemInstructionText), 'SYSTEM_INSTRUCTION should not contain Arabic/Urdu/Persian/Hindi script characters');
 });
 
 test('GEMINI_API_KEY stays server-side only', () => {
