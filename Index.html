@@ -187,6 +187,13 @@ let liveUser = null, liveAI = null;      // streaming transcript elements
 let greeted = false;
 
 /* ------------------------------------------------------------------ */
+/* Agent tools: state                                                  */
+/* ------------------------------------------------------------------ */
+let toolStatusActive = false;             // true while a tool is executing
+let cachedLocation = null;                // { lat, lon, address, city, ts }
+const LOCATION_CACHE_MS = 5 * 60 * 1000; // cache location for 5 minutes
+
+/* ------------------------------------------------------------------ */
 /* Temporary one-turn latency diagnostics                              */
 /* ------------------------------------------------------------------ */
 // This is intentionally observation-only. It does not perform VAD or alter
@@ -396,9 +403,23 @@ const COLORS = { idle:'#38e8ff', connecting:'#38e8ff', listening:'#38e8ff', thin
 function setState(s){
   if (state === s) return;
   state = s;
+  if (toolStatusActive) return; // tool status overrides normal status display
   els.status.textContent = LABELS[s];
   if (HINTS[s] !== undefined && !(s==='error')) els.hint.textContent = HINTS[s];
   document.documentElement.style.setProperty('--accent', COLORS[s]);
+}
+function showToolStatus(msg){
+  toolStatusActive = true;
+  els.status.textContent = msg;
+  els.hint.textContent = msg;
+  document.documentElement.style.setProperty('--accent', COLORS.thinking);
+}
+function clearToolStatus(){
+  toolStatusActive = false;
+  // Re-apply current state to restore normal display
+  const s = state;
+  state = '';  // force setState to re-render
+  setState(s);
 }
 function setSession(on){
   active = on;
@@ -740,6 +761,16 @@ function handleServer(m, wsReceivedAt){
     return;
   }
 
+  // ---- Agent tool calls (function calling) ----
+  // Gemini Live sends toolCall at the top level of the message (outside
+  // serverContent). Handle it here and continue to process any serverContent
+  // that may accompany it in the same frame.
+  if (m.toolCall && m.toolCall.functionCalls && m.toolCall.functionCalls.length) {
+    for (const fc of m.toolCall.functionCalls) {
+      executeToolCall(fc);
+    }
+  }
+
   const sc = m.serverContent;
   if (!sc) return;
   const handlerStartedAt = performance.now();
@@ -799,10 +830,15 @@ function handleServer(m, wsReceivedAt){
 
   const parts = (sc.modelTurn && sc.modelTurn.parts) || [];
   for (const p of parts){
+    // Audio data (existing behavior)
     const d = p.inlineData;
     if (d && d.mimeType && d.mimeType.indexOf('audio/pcm') === 0){
       if (liveUser){ seal(liveUser); liveUser = null; }
       enqueue(d.data, serverEventAt);
+    }
+    // Function call within model turn (alternative to top-level toolCall)
+    if (p.functionCall){
+      executeToolCall({ name: p.functionCall.name, id: p.functionCall.id, args: p.functionCall.args || {} });
     }
   }
   if (parts.length && state !== 'speaking') setState('speaking');
@@ -860,10 +896,288 @@ function flushPlayback(){
   if (outCtx) playHead = outCtx.currentTime;
 }
 
+/* ------------------------------------------------------------------ */
+/* Agent tools: execution                                              */
+/* ------------------------------------------------------------------ */
+
+async function executeToolCall(fc){
+  const name = fc.name;
+  const id   = fc.id;
+  const args = fc.args || {};
+  console.info('[JARVIS TOOL]', name, JSON.stringify(args));
+
+  let result;
+  try {
+    if (name === 'web_search') {
+      showToolStatus('Searching the web…');
+      result = await executeWebSearch(args.query || '');
+    } else if (name === 'get_current_location') {
+      showToolStatus('Getting your location…');
+      result = await executeGetLocation();
+    } else if (name === 'search_nearby') {
+      const cat = args.category || 'any';
+      showToolStatus('Finding nearby ' + cat + '…');
+      result = await executeSearchNearby(cat, args.radius_km);
+    } else {
+      result = { ok: false, error: 'unknown_tool: ' + name };
+    }
+  } catch (e) {
+    console.error('[JARVIS TOOL] error:', e);
+    result = { ok: false, error: e.message || 'Tool execution failed' };
+  }
+
+  clearToolStatus();
+
+  // Send the tool response back to Gemini Live
+  if (ws && ws.readyState === 1) {
+    const response = JSON.stringify({
+      toolResponse: {
+        functionResponses: [{
+          id: id,
+          name: name,
+          response: { result: typeof result === 'string' ? result : JSON.stringify(result) }
+        }]
+      }
+    });
+    ws.send(response);
+    console.info('[JARVIS TOOL] response sent for', name);
+  } else {
+    console.warn('[JARVIS TOOL] socket not ready, cannot send response for', name);
+  }
+}
+
+/* ---- web_search: call the server-side backend ---- */
+async function executeWebSearch(query){
+  if (!query || !query.trim()) return { ok: false, error: 'No search query provided.' };
+  if (!BACKEND_URL || BACKEND_URL.indexOf('PASTE_YOUR') === 0)
+    return { ok: false, error: 'Backend not configured.' };
+
+  const url = BACKEND_URL + (BACKEND_URL.includes('?') ? '&' : '?')
+    + 'action=web_search&q=' + encodeURIComponent(query) + '&t=' + Date.now();
+
+  const r = await fetch(url);
+  if (!r.ok) return { ok: false, error: 'Search request failed (HTTP ' + r.status + ').' };
+  const data = await r.json();
+  if (!data.ok) return { ok: false, error: data.error || 'Search returned no results.' };
+  return {
+    ok: true,
+    query: query,
+    results: data.text,
+    sources: (data.sources || []).slice(0, 5)
+  };
+}
+
+/* ---- get_current_location: browser geolocation + reverse geocoding ---- */
+async function executeGetLocation(){
+  if (!navigator.geolocation)
+    return { ok: false, error: 'Geolocation is not supported by this browser.' };
+
+  // Return cached location if fresh
+  if (cachedLocation && (Date.now() - cachedLocation.ts) < LOCATION_CACHE_MS) {
+    return {
+      ok: true,
+      latitude: cachedLocation.lat,
+      longitude: cachedLocation.lon,
+      address: cachedLocation.address,
+      city: cachedLocation.city,
+      region: cachedLocation.region,
+      country: cachedLocation.country,
+      cached: true
+    };
+  }
+
+  const pos = await new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: false,
+      timeout: 10000,
+      maximumAge: 60000
+    });
+  }).catch(err => {
+    if (err.code === 1) return { error: 'Location permission denied by user.' };
+    if (err.code === 2) return { error: 'Location unavailable. The device could not determine your position.' };
+    if (err.code === 3) return { error: 'Location request timed out.' };
+    return { error: 'Location error: ' + (err.message || 'unknown') };
+  });
+
+  if (pos && pos.error) return { ok: false, error: pos.error };
+  if (!pos || !pos.coords)
+    return { ok: false, error: 'Could not obtain your location.' };
+
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+
+  // Reverse geocode via Nominatim (OpenStreetMap)
+  let address = '', city = '', region = '', country = '';
+  try {
+    const geoUrl = 'https://nominatim.openstreetmap.org/reverse'
+      + '?lat=' + lat + '&lon=' + lon
+      + '&format=json&zoom=14&addressdetails=1&accept-language=en';
+    const r = await fetch(geoUrl);
+    if (r.ok) {
+      const geo = await r.json();
+      address = geo.display_name || '';
+      const a = geo.address || {};
+      city    = a.city || a.town || a.village || a.hamlet || a.suburb || '';
+      region  = a.state || a.region || a.county || '';
+      country = a.country || '';
+    }
+  } catch (e) {
+    // Geocoding failure is non-fatal; we still have coordinates
+    console.warn('[JARVIS TOOL] reverse geocoding failed:', e);
+  }
+
+  // Cache the location
+  cachedLocation = { lat, lon, address, city, region, country, ts: Date.now() };
+
+  return {
+    ok: true,
+    latitude: lat,
+    longitude: lon,
+    address: address || 'Approximate coordinates: ' + lat.toFixed(4) + ', ' + lon.toFixed(4),
+    city: city,
+    region: region,
+    country: country
+  };
+}
+
+/* ---- search_nearby: Overpass API (OpenStreetMap) ---- */
+
+const NEARBY_CATEGORIES = {
+  clinic:       { tags: [['amenity','clinic'],['amenity','doctors']], label: 'clinics and doctors' },
+  hospital:     { tags: [['amenity','hospital']], label: 'hospitals' },
+  pharmacy:     { tags: [['amenity','pharmacy']], label: 'pharmacies' },
+  medical_shop: { tags: [['amenity','pharmacy'],['shop','medical_supply']], label: 'pharmacies and medical shops' },
+  dentist:      { tags: [['amenity','dentist']], label: 'dentists' },
+  doctor:       { tags: [['amenity','doctors'],['amenity','clinic']], label: 'doctors and clinics' },
+  restaurant:   { tags: [['amenity','restaurant']], label: 'restaurants' },
+  cafe:         { tags: [['amenity','cafe']], label: 'cafes' },
+  bank:         { tags: [['amenity','bank']], label: 'banks' },
+  atm:          { tags: [['amenity','atm']], label: 'ATMs' },
+  grocery:      { tags: [['shop','supermarket'],['shop','convenience'],['shop','greengrocer']], label: 'grocery stores' },
+  fuel:         { tags: [['amenity','fuel']], label: 'fuel stations' },
+  hotel:        { tags: [['tourism','hotel'],['tourism','guest_house'],['tourism','motel']], label: 'hotels and guest houses' }
+};
+
+function buildOverpassQuery(lat, lon, radiusM, tags){
+  const parts = tags.map(([k,v]) => {
+    const q = 'node["' + k + '"="' + v + '"](around:' + radiusM + ',' + lat + ',' + lon + ');'
+            + 'way["' + k + '"="' + v + '"](around:' + radiusM + ',' + lat + ',' + lon + ');';
+    return q;
+  });
+  return '[out:json][timeout:12];(' + parts.join('') + ');out center 15;';
+}
+
+function haversineKm(lat1, lon1, lat2, lon2){
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2)
+          + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180)
+          * Math.sin(dLon/2) * Math.sin(dLon/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistance(km){
+  if (km < 1) return Math.round(km * 1000) + ' meters';
+  return km.toFixed(1) + ' km';
+}
+
+async function executeSearchNearby(category, radiusKm){
+  // Ensure we have a location
+  let loc = cachedLocation;
+  if (!loc || (Date.now() - loc.ts) > LOCATION_CACHE_MS) {
+    const locResult = await executeGetLocation();
+    if (!locResult.ok) return locResult;
+    loc = { lat: locResult.latitude, lon: locResult.longitude, address: locResult.address,
+            city: locResult.city, region: locResult.region, country: locResult.country, ts: Date.now() };
+    cachedLocation = loc;
+  }
+
+  const catKey = (category || 'any').toLowerCase().replace(/[^a-z_]/g, '');
+  const catDef = NEARBY_CATEGORIES[catKey];
+  const radiusM = Math.min(Math.max(Math.round((radiusKm || 2) * 1000), 200), 10000);
+
+  let tags;
+  if (catDef) {
+    tags = catDef.tags;
+  } else {
+    // "any" or unknown category — search a broad set
+    tags = [
+      ['amenity','clinic'],['amenity','hospital'],['amenity','pharmacy'],
+      ['amenity','doctors'],['amenity','dentist'],['amenity','restaurant'],
+      ['amenity','cafe'],['amenity','bank'],['amenity','atm'],['amenity','fuel'],
+      ['shop','supermarket'],['tourism','hotel']
+    ];
+  }
+
+  const query = buildOverpassQuery(loc.lat, loc.lon, radiusM, tags);
+  const overpassUrl = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+
+  let elements;
+  try {
+    const r = await fetch(overpassUrl);
+    if (!r.ok) return { ok: false, error: 'Nearby search failed (HTTP ' + r.status + ').' };
+    const data = await r.json();
+    elements = data.elements || [];
+  } catch (e) {
+    return { ok: false, error: 'Nearby search request failed: ' + (e.message || 'network error') };
+  }
+
+  if (!elements.length) {
+    return {
+      ok: true,
+      found: 0,
+      category: catDef ? catDef.label : category,
+      radius: formatDistance(radiusM / 1000),
+      message: 'No ' + (catDef ? catDef.label : category) + ' found within ' + formatDistance(radiusM / 1000) + ' of your location.'
+    };
+  }
+
+  // Enrich with distance and sort
+  const results = elements.map(el => {
+    const elLat = el.lat || (el.center && el.center.lat);
+    const elLon = el.lon || (el.center && el.center.lon);
+    const dist  = (elLat !== undefined && elLon !== undefined)
+      ? haversineKm(loc.lat, loc.lon, elLat, elLon) : null;
+    const tags  = el.tags || {};
+    return {
+      name:    tags.name || tags['name:en'] || 'Unnamed',
+      category:tags.amenity || tags.shop || tags.tourism || category,
+      address: tags['addr:street']
+        ? (tags['addr:housenumber'] ? tags['addr:housenumber'] + ' ' : '') + tags['addr:street']
+          + (tags['addr:city'] ? ', ' + tags['addr:city'] : '')
+        : '',
+      phone:   tags.phone || tags['contact:phone'] || '',
+      opening: tags.opening_hours || '',
+      website: tags.website || tags['contact:website'] || '',
+      distance: dist,
+      distanceText: dist !== null ? formatDistance(dist) : 'unknown',
+      lat: elLat,
+      lon: elLon,
+      mapLink: (elLat !== undefined && elLon !== undefined)
+        ? 'https://www.openstreetmap.org/?mlat=' + elLat + '&mlon=' + elLon + '#map=17/' + elLat + '/' + elLon
+        : ''
+    };
+  }).filter(r => r.lat !== undefined)
+    .sort((a, b) => (a.distance || 999) - (b.distance || 999))
+    .slice(0, 8);
+
+  return {
+    ok: true,
+    found: results.length,
+    category: catDef ? catDef.label : category,
+    radius: formatDistance(radiusM / 1000),
+    userLocation: loc.city ? loc.city + (loc.region ? ', ' + loc.region : '') : loc.address,
+    results: results
+  };
+}
+
 function stopSession(silent){
   setSession(false);
   stopWarm();
   flushPlayback();
+  toolStatusActive = false; // clear any pending tool status
+  cachedLocation = null;    // don't persist location across sessions
   try { if (ws){ ws.onclose = null; ws.close(); } } catch(e){}
   ws = null;
   liveSetupReady = false;
