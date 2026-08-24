@@ -21,6 +21,7 @@ short-lived ephemeral token with the model, persona and voice locked in.
 |---|---|
 | `Index.html` | Your GitHub Pages repo (root). The whole frontend — no build step, no dependencies. |
 | `Code.gs` | A Google Apps Script project, deployed as a Web app. |
+| `local-agent/` | Optional. Runs on your Windows PC so JARVIS can see the screen on demand. |
 
 ---
 
@@ -91,6 +92,10 @@ const BACKEND_URL = "https://script.google.com/macros/s/AKfy..../exec";
 - **Futuristic orb** that reacts to your mic level while listening and to JARVIS's actual
   output waveform while speaking, with distinct idle / thinking / error states.
 - **Human error messages**; technical detail goes to the console only.
+- **Local computer agent (Phase 1)** — optional program on your Windows PC that lets
+  JARVIS take an on-demand screenshot, read the active window, and report screen size.
+  It binds only to `127.0.0.1:18765`, requires a local token, and never sees your
+  Gemini API key. Setup: see [`local-agent/README.md`](local-agent/README.md).
 
 ## Free-tier limits, honestly
 
@@ -105,10 +110,8 @@ const BACKEND_URL = "https://script.google.com/macros/s/AKfy..../exec";
 - Model preview names change; if the socket closes immediately, update `LIVE_MODEL` in
   `Code.gs` to a current Live model and redeploy a **new version**.
 
-## Roadmap (not in v1)
+## Roadmap
 
-Tool calling (`open YouTube`, `set a reminder`), camera/vision input, long-term memory in a
-Google Sheet, and calendar access. The backend already returns a locked config object, so
-adding `functionDeclarations` to `liveConfig_()` is the natural next step — the client would
-then handle `toolCall` messages and reply with `toolResponse`. JARVIS is instructed never to
-claim it performed an action that no tool actually performed.
+Phase 1 (this release) adds a **local computer agent** for on-demand screen access.
+Phase 2 (not implemented) may add controlled mouse/keyboard actions after that
+architecture is proven. Long-term memory and calendar access remain future work.

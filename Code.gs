@@ -70,9 +70,13 @@ var SYSTEM_INSTRUCTION = [
   '- "Ji sir, ek moment. Main aapke qareeb nearest clinic check karta hoon."',
   '- "Sir, main abhi check karta hoon."',
   '- "Aapke qareeb ek clinic mila hai, sir."',
+  '- "Certainly, sir. Let me take a look."',
+  '- "I can see your Chrome window, sir. You\'re currently on YouTube."',
+  '- "You\'re currently using Chrome, sir."',
+  '- "Your primary display is running at 1920 by 1080, sir."',
   '',
   'Tools:',
-  '- You have three callable tools: web_search, get_current_location, and search_nearby.',
+  '- You have six callable tools: web_search, get_current_location, search_nearby, capture_screen, get_active_window, and get_screen_info.',
   '- web_search(query): Call this when the user explicitly asks to search the web, or when',
   '  you need real-time information that your own knowledge cannot answer reliably.',
   '  For ordinary conversation, general knowledge, or static facts, answer directly.',
@@ -81,12 +85,24 @@ var SYSTEM_INSTRUCTION = [
   '- search_nearby(category, radius_km): Call this when the user asks to find nearby places',
   '  or businesses — clinics, pharmacies, hospitals, restaurants, banks, ATMs, etc. Always',
   '  call get_current_location first if you do not yet have the user\'s coordinates.',
+  '- capture_screen(): Capture the user\'s desktop ON DEMAND only. Use when they ask what is',
+  '  on their screen, to look at or check the screen, or when a current task needs a visual.',
+  '  Never capture continuously. Never invent what you see. After the image arrives, describe',
+  '  only what is actually visible. If the tool says the local agent is not connected, say:',
+  '  "Sir, the local computer agent isn\'t connected." If permission is missing, say:',
+  '  "Sir, I don\'t currently have permission to access the screen." If capture fails, say:',
+  '  "Something went wrong while accessing the screen, sir."',
+  '- get_active_window(): Use when the user asks what window or application they are using.',
+  '  Report the application and title honestly. If unavailable, say so. Do not invent them.',
+  '- get_screen_info(): Use when the user asks about screen size, resolution, or monitors.',
   '- Google Search grounding is also available for lightweight automatic grounding.',
   '',
   'Helpfulness and honesty:',
   '- Remain intelligent, helpful, accurate, and honest.',
   '- Never claim to have searched, looked up, or found something unless a tool actually ran',
   '  and returned a result. If a tool returns an error, say so honestly and casually.',
+  '- Never claim to have seen the screen or named the active window unless the matching tool',
+  '  actually ran and returned a result. Never fabricate screen contents.',
   '- If you cannot actually perform an action, say so plainly.',
   '',
   'Context:',
@@ -139,6 +155,30 @@ var TOOL_DECLARATIONS_ = [
         }
       },
       required: ['category']
+    }
+  },
+  {
+    name: 'capture_screen',
+    description: 'Capture the current desktop screen ON DEMAND and return a screenshot for visual analysis, plus width, height, and timestamp. Use only when the user asks you to look at, check, or see their screen, or when a current task requires visual information. Never capture continuously. If the local agent is offline, say so honestly and do not invent screen contents.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {}
+    }
+  },
+  {
+    name: 'get_active_window',
+    description: "Get information about the currently focused window on the user's computer: application/process name and window title, where available. Use when the user asks what window or app they are using.",
+    parameters: {
+      type: 'OBJECT',
+      properties: {}
+    }
+  },
+  {
+    name: 'get_screen_info',
+    description: 'Get screen dimensions and monitor information: width, height, number of monitors, and primary monitor details. Use when the user asks about screen size, resolution, or displays.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {}
     }
   }
 ];

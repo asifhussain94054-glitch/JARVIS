@@ -1,0 +1,4 @@
+# JARVIS Local Agent — Phase 1
+# Screen capture + window info only. No AI APIs. No paid services.
+mss>=9.0.1
+Pillow>=10.0.0
