@@ -120,6 +120,35 @@
     backdrop-filter:blur(8px);
   }
   .err.show{transform:translate(-50%,0)}
+
+  /* ---- local agent indicator (Phase 1) ---- */
+  .agent-ind{
+    margin-top:14px;display:inline-flex;align-items:center;gap:8px;
+    font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);
+    cursor:pointer;user-select:none;
+  }
+  .agent-dot{
+    width:7px;height:7px;border-radius:50%;background:#3a4a52;
+    box-shadow:none;flex:0 0 auto;
+  }
+  .agent-ind.on{color:#8fd7c0}
+  .agent-ind.on .agent-dot{background:#3dff9a;box-shadow:0 0 8px rgba(61,255,154,.7)}
+  .agent-ind.auth{color:#ffb648}
+  .agent-ind.auth .agent-dot{background:#ffb648;box-shadow:0 0 8px rgba(255,182,72,.45)}
+  .agent-panel{
+    display:none;margin:8px auto 0;width:min(280px,86vw);text-align:left;
+  }
+  .agent-panel.show{display:block}
+  .agent-panel input{
+    width:100%;background:rgba(8,16,24,.85);border:1px solid rgba(56,232,255,.22);
+    color:var(--text);padding:7px 9px;border-radius:6px;font-size:11px;
+    letter-spacing:0;text-transform:none;outline:none;
+  }
+  .agent-panel button{
+    margin-top:6px;background:transparent;border:1px solid rgba(56,232,255,.35);
+    color:var(--cyan);font-size:9px;letter-spacing:.18em;text-transform:uppercase;
+    padding:5px 10px;border-radius:6px;cursor:pointer;
+  }
 </style>
 </head>
 <body>
@@ -129,6 +158,15 @@
 <header>
   <h1>JARVIS</h1>
   <div class="tag">Your Personal AI Assistant</div>
+  <div class="agent-ind" id="agentInd" title="Local computer agent status" role="button" tabindex="0">
+    <span class="agent-dot" id="agentDot"></span>
+    <span>LOCAL AGENT</span>
+    <span class="agent-st" id="agentSt">Offline</span>
+  </div>
+  <div class="agent-panel" id="agentPanel">
+    <input id="agentToken" type="password" autocomplete="off" spellcheck="false" placeholder="Paste local agent token" />
+    <button type="button" id="agentSave">Connect</button>
+  </div>
 </header>
 
 <main class="stage">
@@ -164,6 +202,8 @@
 
 /* >>> PASTE YOUR APPS SCRIPT WEB APP /exec URL HERE <<< */
 const BACKEND_URL = "https://script.google.com/macros/s/AKfycbzJrvQD-Ia7pEqebsLvxTmqCATWc9631uC9YOO6aWo_wcY_Yn-pNMCq-zSafHyA6WF9BQ/exec";
+const LOCAL_AGENT_URL = "http://127.0.0.1:18765";
+const AGENT_TOKEN_KEY = "jarvis_local_agent_token";
 
 const WS_HOST = "wss://generativelanguage.googleapis.com";
 // Ephemeral tokens ONLY work on the ...Constrained endpoint.
@@ -171,7 +211,8 @@ const WS_PATH = v => "/ws/google.ai.generativelanguage." + v + ".GenerativeServi
 const MIC_RATE = 16000, OUT_RATE = 24000;
 
 const $ = id => document.getElementById(id);
-const els = { status:$('status'), hint:$('hint'), log:$('log'), mic:$('mic'), session:$('sessionLabel'), err:$('err') };
+const els = { status:$('status'), hint:$('hint'), log:$('log'), mic:$('mic'), session:$('sessionLabel'), err:$('err'),
+  agentInd:$('agentInd'), agentSt:$('agentSt'), agentPanel:$('agentPanel'), agentToken:$('agentToken'), agentSave:$('agentSave') };
 
 let state = 'idle';         // idle | connecting | listening | thinking | speaking | error
 let active = false;
@@ -907,6 +948,7 @@ async function executeToolCall(fc){
   console.info('[JARVIS TOOL]', name, JSON.stringify(args));
 
   let result;
+  let screenImage = null;
   try {
     if (name === 'web_search') {
       showToolStatus('Searching the web…');
@@ -918,6 +960,20 @@ async function executeToolCall(fc){
       const cat = args.category || 'any';
       showToolStatus('Finding nearby ' + cat + '…');
       result = await executeSearchNearby(cat, args.radius_km);
+    } else if (name === 'capture_screen') {
+      showToolStatus('Looking at your screen...');
+      result = await executeCaptureScreen();
+      if (result && result.ok && result.image) {
+        screenImage = { mimeType: result.mime_type || result.mimeType || 'image/jpeg', data: result.image };
+        showToolStatus('Screen analyzed.');
+        await new Promise(r => setTimeout(r, 350));
+      }
+    } else if (name === 'get_active_window') {
+      showToolStatus('Checking the active window…');
+      result = await executeGetActiveWindow();
+    } else if (name === 'get_screen_info') {
+      showToolStatus('Reading display information…');
+      result = await executeGetScreenInfo();
     } else {
       result = { ok: false, error: 'unknown_tool: ' + name };
     }
@@ -926,22 +982,39 @@ async function executeToolCall(fc){
     result = { ok: false, error: e.message || 'Tool execution failed' };
   }
 
+  // Never send raw screenshot bytes inside the JSON result string.
+  if (result && typeof result === 'object' && result.image) {
+    result = Object.assign({}, result);
+    delete result.image;
+  }
+
   clearToolStatus();
 
   // Send the tool response back to Gemini Live
   if (ws && ws.readyState === 1) {
+    if (screenImage && screenImage.data) {
+      // Live API vision path: one on-demand frame, then discard.
+      ws.send(JSON.stringify({
+        realtimeInput: { video: { mimeType: screenImage.mimeType, data: screenImage.data } }
+      }));
+    }
     const response = JSON.stringify({
       toolResponse: {
         functionResponses: [{
           id: id,
           name: name,
-          response: { result: typeof result === 'string' ? result : JSON.stringify(result) }
+          response: { result: typeof result === 'string' ? result : JSON.stringify(result) },
+          parts: (screenImage && screenImage.data)
+            ? [{ inlineData: { mimeType: screenImage.mimeType, data: screenImage.data } }]
+            : undefined
         }]
       }
     });
     ws.send(response);
+    screenImage = null;
     console.info('[JARVIS TOOL] response sent for', name);
   } else {
+    screenImage = null;
     console.warn('[JARVIS TOOL] socket not ready, cannot send response for', name);
   }
 }
@@ -1172,6 +1245,161 @@ async function executeSearchNearby(category, radiusKm){
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Local computer agent (Phase 1) — screen / window / display info     */
+/* ------------------------------------------------------------------ */
+
+const AGENT_OFFLINE = {
+  ok: false,
+  error: 'agent_offline',
+  message: "Sir, the local computer agent isn't connected."
+};
+
+function setAgentUi(state){
+  agentState = state;
+  if (!els.agentInd) return;
+  els.agentInd.classList.toggle('on', state === 'connected');
+  els.agentInd.classList.toggle('auth', state === 'auth');
+  if (els.agentSt) {
+    els.agentSt.textContent = state === 'connected' ? 'Connected'
+      : state === 'auth' ? 'Needs token' : 'Offline';
+  }
+}
+
+function getAgentToken(){
+  try { return localStorage.getItem(AGENT_TOKEN_KEY) || ''; } catch (e) { return ''; }
+}
+function saveAgentToken(token){
+  try {
+    if (token) localStorage.setItem(AGENT_TOKEN_KEY, token);
+    else localStorage.removeItem(AGENT_TOKEN_KEY);
+  } catch (e) {}
+}
+
+async function agentFetch(path, opts){
+  const token = getAgentToken();
+  if (!token) return { _offline: true, _needToken: true };
+  try {
+    const r = await fetch(LOCAL_AGENT_URL + path, {
+      method: (opts && opts.method) || 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json'
+      },
+      cache: 'no-store'
+    });
+    if (r.status === 401) {
+      setAgentUi('auth');
+      return {
+        ok: false,
+        error: 'permission_denied',
+        message: "Sir, I don't currently have permission to access the screen."
+      };
+    }
+    let data;
+    try { data = await r.json(); } catch (e) {
+      return {
+        ok: false,
+        error: 'capture_failed',
+        message: "Something went wrong while accessing the screen, sir."
+      };
+    }
+    return data;
+  } catch (e) {
+    setAgentUi('offline');
+    return { _offline: true };
+  }
+}
+
+async function executeCaptureScreen(){
+  const data = await agentFetch('/capture_screen', { method: 'POST' });
+  if (data && data._offline) return AGENT_OFFLINE;
+  if (!data || !data.ok) {
+    if (data && data.error === 'permission_denied') {
+      return {
+        ok: false,
+        error: 'permission_denied',
+        message: data.message || "Sir, I don't currently have permission to access the screen."
+      };
+    }
+    return {
+      ok: false,
+      error: 'capture_failed',
+      message: (data && data.message) || "Something went wrong while accessing the screen, sir."
+    };
+  }
+  return data;
+}
+
+async function executeGetActiveWindow(){
+  const data = await agentFetch('/active_window');
+  if (data && data._offline) return AGENT_OFFLINE;
+  if (!data || data.ok === false) {
+    return data || { ok: false, error: 'unavailable', message: "Sir, I don't currently have permission to access the screen." };
+  }
+  return data;
+}
+
+async function executeGetScreenInfo(){
+  const data = await agentFetch('/screen_info');
+  if (data && data._offline) return AGENT_OFFLINE;
+  if (!data || data.ok === false) {
+    return data || { ok: false, error: 'unavailable', message: "Something went wrong while accessing the screen, sir." };
+  }
+  return data;
+}
+
+async function checkAgentConnection(){
+  try {
+    const health = await fetch(LOCAL_AGENT_URL + '/health', { cache: 'no-store' });
+    if (!health.ok) { setAgentUi('offline'); return; }
+    const token = getAgentToken();
+    if (!token) { setAgentUi('auth'); return; }
+    const ready = await fetch(LOCAL_AGENT_URL + '/ready', {
+      cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (ready.ok) setAgentUi('connected');
+    else setAgentUi('auth');
+  } catch (e) {
+    setAgentUi('offline');
+  }
+}
+
+function startAgentWatch(){
+  try {
+    const params = new URLSearchParams(location.search);
+    const fromUrl = params.get('agentToken');
+    if (fromUrl) {
+      saveAgentToken(fromUrl.trim());
+      try {
+        params.delete('agentToken');
+        const qs = params.toString();
+        history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+      } catch (e) {}
+    }
+  } catch (e) {}
+  if (els.agentToken) els.agentToken.value = getAgentToken();
+  checkAgentConnection();
+  clearInterval(agentWatchTimer);
+  agentWatchTimer = setInterval(checkAgentConnection, 5000);
+  if (els.agentInd) {
+    const toggle = () => { if (els.agentPanel) els.agentPanel.classList.toggle('show'); };
+    els.agentInd.addEventListener('click', toggle);
+    els.agentInd.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+  }
+  if (els.agentSave) {
+    els.agentSave.addEventListener('click', () => {
+      const token = (els.agentToken && els.agentToken.value || '').trim();
+      saveAgentToken(token);
+      if (els.agentPanel) els.agentPanel.classList.remove('show');
+      checkAgentConnection();
+    });
+  }
+}
+
 function stopSession(silent){
   setSession(false);
   stopWarm();
@@ -1226,6 +1454,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && active) stopSession(false);
 });
 startWarm(); // keep the backend hot so the first session starts quickly
+startAgentWatch(); // poll the local computer agent without touching the voice path
 </script>
 </body>
 </html>

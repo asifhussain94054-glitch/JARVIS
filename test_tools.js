@@ -486,6 +486,160 @@ test('Existing BACKEND_URL preserved', () => {
   assert(script.includes('AKfycbzJrvQD-Ia7pEqebsLvxTmqCATWc9631uC9YOO6aWo_wcY_Yn-pNMCq-zSafHyA6WF9BQ'));
 });
 
+console.log('\\n=== Local computer agent (Phase 1) ===');
+
+const agentPyPath = path.join(__dirname, 'local-agent', 'agent.py');
+const agentReadmePath = path.join(__dirname, 'local-agent', 'README.md');
+const agentReqPath = path.join(__dirname, 'local-agent', 'requirements.txt');
+assert(fs.existsSync(agentPyPath), 'local-agent/agent.py missing');
+const agentPy = fs.readFileSync(agentPyPath, 'utf8');
+const agentReq = fs.readFileSync(agentReqPath, 'utf8');
+const agentReadme = fs.readFileSync(agentReadmePath, 'utf8');
+
+test('local-agent directory and beginner README exist', () => {
+  assert(fs.existsSync(path.join(__dirname, 'local-agent', 'start.bat')));
+  assert(fs.existsSync(path.join(__dirname, 'local-agent', 'stop.bat')));
+  assert(agentReadme.includes('## 1. Requirements'));
+  assert(agentReadme.includes('## 2. Installation'));
+  assert(agentReadme.includes('## 3. How to start the local agent'));
+  assert(agentReadme.includes('## 4. How to stop it'));
+  assert(agentReadme.includes('## 5. How to connect it to JARVIS'));
+  assert(agentReadme.includes('## 6. Windows permissions required'));
+  assert(agentReadme.includes('## 7. Security model'));
+  assert(agentReadme.includes('## 8. Troubleshooting'));
+  assert(agentReadme.includes('## 9. How to verify the agent is connected'));
+});
+
+test('local agent binds only to 127.0.0.1', () => {
+  assert(agentPy.includes('DEFAULT_HOST = "127.0.0.1"'));
+  assert(agentPy.includes('DEFAULT_PORT = 18765'));
+  assert(agentPy.includes('refuse_public_bind'));
+  assert(agentPy.includes('ALLOWED_BIND_HOSTS'));
+});
+
+test('local agent requires bearer token authentication', () => {
+  assert(agentPy.includes('Authorization'));
+  assert(agentPy.includes('hmac.compare_digest'));
+  assert(agentPy.includes('unauthorized'));
+});
+
+test('local agent implements the three Phase 1 endpoints', () => {
+  assert(agentPy.includes('/capture_screen'));
+  assert(agentPy.includes('/active_window'));
+  assert(agentPy.includes('/screen_info'));
+  assert(agentPy.includes('def capture_screen'));
+  assert(agentPy.includes('def get_active_window'));
+  assert(agentPy.includes('def get_screen_info'));
+});
+
+test('screenshots stay in memory and are not stored permanently', () => {
+  assert(agentPy.includes('BytesIO'));
+  assert(agentPy.includes('MemoryStream'));
+  assert(!agentPy.includes('open(') || !/open\([^)]+\.(png|jpg|jpeg)/i.test(agentPy));
+  assert(script.includes('screenImage = null'));
+  assert(script.includes('delete result.image'));
+});
+
+test('no GEMINI_API_KEY in the local agent or frontend', () => {
+  assert(!script.includes('GEMINI_API_KEY'));
+  assert(!agentPy.includes('os.environ.get("GEMINI_API_KEY"'));
+  assert(!agentPy.includes('getenv("GEMINI_API_KEY"'));
+  assert(agentPy.includes('Does NOT use, store, or need GEMINI_API_KEY'));
+  assert(!agentReq.toLowerCase().includes('google-generativeai'));
+  assert(!agentReq.toLowerCase().includes('openai'));
+});
+
+test('Phase 1 does not implement mouse, keyboard, or keylogging', () => {
+  ['SetCursorPos', 'mouse_event', 'keybd_event', 'SendInput', 'pynput', 'GetAsyncKeyState']
+    .forEach(api => {
+      assert(!agentPy.includes(api), 'forbidden API in agent: ' + api);
+      assert(!script.includes(api), 'forbidden API in frontend: ' + api);
+    });
+});
+
+test('Code.gs declares capture_screen, get_active_window, get_screen_info', () => {
+  assert(codeGs.includes("name: 'capture_screen'"));
+  assert(codeGs.includes("name: 'get_active_window'"));
+  assert(codeGs.includes("name: 'get_screen_info'"));
+});
+
+test('System instruction documents computer tools and honest errors', () => {
+  assert(systemInstructionText.includes('capture_screen'));
+  assert(systemInstructionText.includes('get_active_window'));
+  assert(systemInstructionText.includes('get_screen_info'));
+  assert(systemInstructionText.includes("Sir, the local computer agent isn't connected."));
+  assert(systemInstructionText.includes("Sir, I don't currently have permission to access the screen."));
+  assert(systemInstructionText.includes('Something went wrong while accessing the screen, sir.'));
+  assert(systemInstructionText.includes('Never fabricate screen contents'));
+});
+
+test('Cinematic screen-tool examples are present', () => {
+  assert(systemInstructionText.includes('Certainly, sir. Let me take a look.'));
+  assert(systemInstructionText.includes("Your primary display is running at 1920 by 1080, sir."));
+});
+
+test('Frontend executes the three computer tools', () => {
+  assert(script.includes('async function executeCaptureScreen'));
+  assert(script.includes('async function executeGetActiveWindow'));
+  assert(script.includes('async function executeGetScreenInfo'));
+  assert(script.includes("name === 'capture_screen'"));
+  assert(script.includes("name === 'get_active_window'"));
+  assert(script.includes("name === 'get_screen_info'"));
+});
+
+test('Frontend talks only to localhost agent URL', () => {
+  assert(script.includes('const LOCAL_AGENT_URL = "http://127.0.0.1:18765"'));
+  assert(!script.includes('0.0.0.0'));
+});
+
+test('Agent offline behavior uses the required spoken message', () => {
+  assert(script.includes("Sir, the local computer agent isn't connected."));
+  assert(script.includes('AGENT_OFFLINE'));
+  assert(script.includes("Sir, I don't currently have permission to access the screen."));
+  assert(script.includes('Something went wrong while accessing the screen, sir.'));
+});
+
+test('UI shows local agent status and looking-at-screen feedback', () => {
+  assert(indexHtml.includes('id="agentInd"'));
+  assert(indexHtml.includes('LOCAL AGENT'));
+  assert(script.includes("Looking at your screen..."));
+  assert(script.includes('Screen analyzed.'));
+  assert(script.includes("state === 'connected' ? 'Connected'"));
+});
+
+test('Existing original tools remain intact alongside computer tools', () => {
+  assert(codeGs.includes("name: 'web_search'"));
+  assert(codeGs.includes("name: 'get_current_location'"));
+  assert(codeGs.includes("name: 'search_nearby'"));
+  assert(script.includes('async function executeWebSearch'));
+  assert(script.includes('async function executeGetLocation'));
+  assert(script.includes('async function executeSearchNearby'));
+});
+
+test('Existing voice system remains intact', () => {
+  assert(script.includes('class MicProc extends AudioWorkletProcessor'));
+  assert(script.includes('BidiGenerateContentConstrained'));
+  assert(script.includes('MIC_RATE = 16000'));
+  assert(script.includes('OUT_RATE = 24000'));
+  assert(script.includes('echoCancellation:true'));
+  assert(codeGs.includes('START_OF_ACTIVITY_INTERRUPTS'));
+  assert(codeGs.includes('VOICE_NAME = \'Charon\''));
+});
+
+/* ================================================================== */
+/* Local agent process tests (Python)                                  */
+/* ================================================================== */
+
+console.log('\\n=== Local agent process tests ===');
+
+test('local agent Python test suite passes', () => {
+  const { execFileSync } = require('child_process');
+  const out = execFileSync('python3',
+    [path.join(__dirname, 'local-agent', 'tests', 'test_agent.py')],
+    { encoding: 'utf8', timeout: 60000 });
+  assert(out.includes('All local-agent tests passed'), out.slice(-400));
+});
+
 /* ================================================================== */
 /* Summary                                                             */
 /* ================================================================== */

@@ -1,0 +1,14 @@
+# Local agent secrets and environment
+local-agent/.agent-token
+local-agent/.venv/
+local-agent/venv/
+local-agent/__pycache__/
+local-agent/**/__pycache__/
+local-agent/.pytest_cache/
+*.pyc
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
